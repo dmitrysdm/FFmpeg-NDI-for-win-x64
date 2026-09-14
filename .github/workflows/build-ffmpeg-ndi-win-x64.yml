@@ -145,11 +145,14 @@ jobs:
             curl -fSL --retry 3 -o /tmp/sdl2c.tar.zst "$PKGURL"
             pacman -U --noconfirm /tmp/sdl2c.tar.zst
           fi
-          # sanity: the .pc file must be visible to pkg-config (FFmpeg probes module 'sdl2',
-          # which sdl2-compat.pc provides via 'Provides: sdl2')
+          # sanity: the .pc file must be visible to the SAME pkg-config configure will
+          # invoke. Under --enable-cross-configure FFmpeg prefixes with cross_prefix, so
+          # it calls the cross binary, not native 'pkg-config'.
           export PKG_CONFIG_PATH="$MSYS2_ROOT/ucrt64/lib/pkgconfig"
-          pkg-config --modversion sdl2 || { echo "FATAL: pkg-config cannot resolve 'sdl2'"; exit 1; }
-          echo "sdl2 OK: $(pkg-config --modversion sdl2)"
+          XPCT="$MSYS2_ROOT/ucrt64/bin/x86_64-w64-mingw32-pkg-config"
+          test -x "$XPCT" || { echo "FATAL: cross pkg-config not found: $XPCT"; exit 1; }
+          "$XPCT" --modversion sdl2 || { echo "FATAL: cross pkg-config cannot resolve 'sdl2'"; "$XPCT" --list-all | head; exit 1; }
+          echo "sdl2 OK via $(basename "$XPCT"): $("$XPCT" --modversion sdl2)"
 
       - name: Clone FFmpeg ${{ env.FFMPEG_TAG }}
         shell: bash
