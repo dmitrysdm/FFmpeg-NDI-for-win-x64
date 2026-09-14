@@ -129,9 +129,27 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-nasm
-            mingw-w64-ucrt-x86_64-sdl2-compat
             mingw-w64-ucrt-x86_64-zlib
             mingw-w64-ucrt-x86_64-pkgconf
+
+      - name: Install SDL2 (compat) via freshly-synced pacman DB
+        shell: msys2 {0}
+        run: |
+          # The MSYS2 base image ships a stale repo.db: the plain 'sdl2' package
+          # was removed from the live ucrt64 repo (replaced by sdl2-compat), so the
+          # action's bundled DB can't resolve it. Sync the DB, then install.
+          pacman -Sy --noconfirm
+          if ! pacman -S --noconfirm mingw-w64-ucrt-x86_64-sdl2-compat; then
+            echo "pacman still cannot resolve sdl2-compat — installing the package tarball directly"
+            PKGURL="https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-sdl2-compat-2.32.72-1-any.pkg.tar.zst"
+            curl -fSL --retry 3 -o /tmp/sdl2c.tar.zst "$PKGURL"
+            pacman -U --noconfirm /tmp/sdl2c.tar.zst
+          fi
+          # sanity: the .pc file must be visible to pkg-config (FFmpeg probes module 'sdl2',
+          # which sdl2-compat.pc provides via 'Provides: sdl2')
+          export PKG_CONFIG_PATH="$MSYS2_ROOT/ucrt64/lib/pkgconfig"
+          pkg-config --modversion sdl2 || { echo "FATAL: pkg-config cannot resolve 'sdl2'"; exit 1; }
+          echo "sdl2 OK: $(pkg-config --modversion sdl2)"
 
       - name: Clone FFmpeg ${{ env.FFMPEG_TAG }}
         shell: bash
