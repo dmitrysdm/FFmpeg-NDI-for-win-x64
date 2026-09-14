@@ -122,12 +122,11 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msys2-arch: ucrt64
-          msys2-update: false
+          msys2-update: true
           install: >-
             make
             patch
             mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-g++
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-nasm
             mingw-w64-ucrt-x86_64-sdl2
