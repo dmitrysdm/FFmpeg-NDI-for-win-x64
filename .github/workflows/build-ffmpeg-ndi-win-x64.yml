@@ -119,10 +119,13 @@ jobs:
         run: cat ndi-sdk/Version.txt 2>/dev/null || echo "(no Version.txt)"
 
       - name: Setup MSYS2 (ucrt64 cross toolchain)
+        # NOTE: the action's input is 'msystem' (NOT 'msys2-arch'); with the wrong
+        # name it is silently ignored and the action defaults to MSYSTEM=MINGW64,
+        # putting /mingw64/bin (not /ucrt64/bin) on PATH -> 'command not found'
+        # for x86_64-w64-mingw32-* and a failed C-compiler test in configure.
         uses: msys2/setup-msys2@v2
         with:
-          msys2-arch: ucrt64
-          msys2-update: true
+          msystem: UCRT64
           install: >-
             make
             patch
