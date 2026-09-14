@@ -198,10 +198,36 @@ jobs:
           cp ../ndi-patch/libavdevice/libndi_newtek_enc.c    libavdevice/
           mkdir -p ndi-sdk
           cp ../ndi-sdk/* ndi-sdk/
-          # generate a proper GNU import library from the PE lib (configure uses -lndi)
-          # (prefixed shim for dlltool is created earlier; no silent fallback —
-          # a broken libndi.dll.a must fail the build loudly)
-          x86_64-w64-mingw32-dlltool -d ndi-sdk/Processing.NDI.Lib.x64.dll -l ndi-sdk/libndi.dll.a
+
+          # Build a PROPER GNU import library (configure links with -lndi).
+          # dlltool's -d takes a DEF file, NOT a DLL — passing the DLL gives
+          # 'Syntax error in def file ...:0' plus a stub libndi.dll.a, and the
+          # final link then dies on undefined __imp_NDIlib_*. Correct flow:
+          # extract the export table from the DLL with objdump -> def -> dlltool.
+          DLL=ndi-sdk/Processing.NDI.Lib.x64.dll
+          DEF=ndi-sdk/ndi-exports.def
+          rm -f ndi-sdk/libndi.dll.a   # drop the PE-.lib copy staged as a fallback
+          {
+            echo "LIBRARY \"Processing.NDI.Lib.x64.dll\""
+            echo "EXPORTS"
+            x86_64-w64-mingw32-objdump -p "$DLL" | awk '
+              /\[Ordinal\/Name Pointer\]/ { f=1; next }
+              f && $1 ~ /^\[[0-9]+\]$/ { print "  " $NF; next }
+              f { f=0 }
+            '
+          } > "$DEF"
+          NEXP=$(grep -c '^  ' "$DEF" || true)
+          [ "$NEXP" -ge 20 ] || { echo "FATAL: only $NEXP NDI exports extracted from $DLL"; head -5 "$DEF"; exit 1; }
+          echo "NDI exports extracted: $NEXP"
+          x86_64-w64-mingw32-dlltool --kill-at --no-idata \
+              -d "$DEF" -l ndi-sdk/libndi.dll.a -D "Processing.NDI.Lib.x64.dll" \
+            || { echo "FATAL: dlltool failed"; head -20 "$DEF"; exit 1; }
+          # the import lib must actually define the __imp_ stubs the code references
+          for sym in NDIlib_initialize NDIlib_recv_create_v3 NDIlib_send_create NDIlib_find_create_v2; do
+            x86_64-w64-mingw32-nm ndi-sdk/libndi.dll.a | grep -q "__imp_$sym" \
+              || { echo "FATAL: __imp_$sym missing from libndi.dll.a"; exit 1; }
+          done
+          echo "libndi.dll.a OK"
           ls -la ndi-sdk
 
       - name: Configure FFmpeg
