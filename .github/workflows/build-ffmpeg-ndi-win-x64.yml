@@ -154,9 +154,9 @@ jobs:
             echo "transmitter died early:"; cat transmit.log; exit 1
           fi
 
-          # 2) capture it back (max 90 s)
+          # 2) capture it back (max 90 s); extra_ips forces unicast discovery on loopback
           timeout 90 ./ffmpeg.exe -hide_banner -loglevel info -y \
-            -i "hermes_ci_source" -t 5 -c copy out.mkv > receive.log 2>&1
+            -i "hermes_ci_source" -extra_ips 127.0.0.1 -t 5 -c copy out.mkv > receive.log 2>&1
           RC=$?
           kill $TX_PID 2>/dev/null || true
           wait $TX_PID 2>/dev/null || true
