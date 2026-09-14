@@ -42,11 +42,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path ndi-sdk | Out-Null
           Copy-Item (Join-Path $incDir "*.h") ndi-sdk/
           Copy-Item $lib  "ndi-sdk/Processing.NDI.Lib.x64.lib"
-          Copy-Item (Join-Path $sdkRoot "Bin\x64\*.dll") ndi-sdk/
+          Copy-Item $dll  "ndi-sdk/Processing.NDI.Lib.x64.dll"
           $ver = Get-ChildItem -Path $sdkRoot -Recurse -Filter "Version.txt" | Select-Object -First 1
           if ($ver) { Copy-Item $ver.FullName ndi-sdk/Version.txt }
 
-          # GNU import-lib alias so configure's "-lndi" resolves
+          # fallback GNU import-lib alias (CI regenerates a proper one with dlltool)
           Copy-Item $lib "ndi-sdk/libndi.dll.a"
 
           Get-ChildItem ndi-sdk | Format-Table Name, Length
@@ -63,7 +63,9 @@ jobs:
           install: >-
             make
             patch
-            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-g++
+            mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-nasm
             mingw-w64-ucrt-x86_64-sdl2
             mingw-w64-ucrt-x86_64-zlib
@@ -83,7 +85,10 @@ jobs:
           cp ../ndi-patch/libavdevice/libndi_newtek_enc.c    libavdevice/
           mkdir -p ndi-sdk
           cp ../ndi-sdk/* ndi-sdk/
-          ls ndi-sdk
+          # generate a proper GNU import library from the PE lib (configure uses -lndi)
+          x86_64-w64-mingw32-dlltool -d ndi-sdk/Processing.NDI.Lib.x64.dll -l ndi-sdk/libndi.dll.a || \
+            echo "dlltool failed, keeping fallback libndi.dll.a"
+          ls -la ndi-sdk
 
       - name: Configure FFmpeg
         shell: msys2 {0}
@@ -97,7 +102,6 @@ jobs:
             --arch=x86_64 \
             --enable-cross-compile \
             --enable-nonfree \
-            --enable-gpl \
             --enable-static \
             --disable-shared \
             --disable-doc \
@@ -128,8 +132,8 @@ jobs:
         working-directory: ffmpeg
         run: |
           cp ndi-sdk/*.dll .
-          ./ffmpeg.exe -hide_banner -devices 2>&1 | tee ../devices.log
-          grep -q "libndi_newtek" ../devices.log || { echo "libndi_newtek missing from -devices"; exit 1; }
+          ./ffmpeg.exe -hide_banner -devices 2>&1 | tee devices.log
+          grep -q "libndi_newtek" devices.log || { echo "libndi_newtek missing from -devices"; exit 1; }
           echo "OK: NDI in/out devices registered"
 
       - name: NDI loopback test (transmit -> receive -> decode)
@@ -177,7 +181,7 @@ jobs:
           Copy-Item ffmpeg/ffmpeg.exe  $pkg/
           Copy-Item ffmpeg/ffprobe.exe $pkg/
           Copy-Item ffmpeg/ffplay.exe  $pkg/
-          Copy-Item ffmpeg/ndi-sdk/*.dll $pkg/
+          Copy-Item ffmpeg/ndi-sdk/Processing.NDI.Lib.x64.dll $pkg/
           if (Test-Path ffmpeg/ndi-sdk/Version.txt) { Copy-Item ffmpeg/ndi-sdk/Version.txt $pkg/ }
 
           $ucrtBin = Join-Path $env:MSYS2_ROOT "ucrt64/bin"
