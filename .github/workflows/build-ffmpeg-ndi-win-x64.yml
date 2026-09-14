@@ -121,7 +121,7 @@ jobs:
         run: |
           ./ffmpeg.exe -version
           ./ffprobe.exe -version | head -1
-          objdump -p ffmpeg.exe | grep -i "Processing.NDI" || echo "WARN: NDI import not found"
+          x86_64-w64-mingw32-objdump -p ffmpeg.exe | grep -i "Processing.NDI" || echo "WARN: NDI import not found"
 
       - name: Verify NDI devices are registered
         shell: msys2 {0}
