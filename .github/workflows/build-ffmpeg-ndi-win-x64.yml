@@ -157,6 +157,33 @@ jobs:
           "$XPCT" --modversion sdl2 || { echo "FATAL: cross pkg-config cannot resolve 'sdl2'"; "$XPCT" --list-all | head; exit 1; }
           echo "sdl2 OK via $(basename "$XPCT"): $("$XPCT" --modversion sdl2)"
 
+      - name: Create prefixed tool shims (ucrt64 binutils ships unprefixed names)
+        shell: msys2 {0}
+        run: |
+          # Modern ucrt64 binutils installs UNPREFIXED tools (ar, as, ld, dlltool,
+          # objdump, strip, ...) in /ucrt64/bin; only the gcc package keeps the
+          # x86_64-w64-mingw32- prefix. FFmpeg's --cross-prefix makes make invoke
+          # $(AR)/$(STRIP)/$(OBJDUMP)/... WITH the prefix -> 'command not found'
+          # (the gcc driver finds as/ld on its own, so only direct tool calls fail).
+          # Fix: place a prefixed COPY next to each real tool (same dir, so the
+          # tools' relative lookups are preserved). Copy (not symlink) so it works
+          # regardless of whether the runner allows symlinks. Never clobber a
+          # natively-provided prefixed binary.
+          B="${MSYS2_ROOT//\\//}/ucrt64/bin"
+          cd "$B"
+          for t in addr2line ar as dlltool dllwrap elfedit gprof ld ld.bfd nm objcopy objdump ranlib readelf size strings strip windmc windres; do
+            if [ -e "$t.exe" ] && [ ! -e "x86_64-w64-mingw32-$t.exe" ]; then
+              cp "$t.exe" "x86_64-w64-mingw32-$t.exe"
+              echo "shim: x86_64-w64-mingw32-$t = $t (copied)"
+            fi
+          done
+          cd - >/dev/null
+          # hard-fail if the exact tools make will call are still unresolvable
+          for t in ar as ld dlltool objdump strip; do
+            command -v "x86_64-w64-mingw32-$t" >/dev/null || { echo "FATAL: x86_64-w64-mingw32-$t not on PATH"; exit 1; }
+          done
+          x86_64-w64-mingw32-ar --version | head -1
+
       - name: Clone FFmpeg ${{ env.FFMPEG_TAG }}
         shell: bash
         run: git clone --depth 1 -b ${{ env.FFMPEG_TAG }} https://github.com/FFmpeg/FFmpeg.git ffmpeg
@@ -172,8 +199,9 @@ jobs:
           mkdir -p ndi-sdk
           cp ../ndi-sdk/* ndi-sdk/
           # generate a proper GNU import library from the PE lib (configure uses -lndi)
-          x86_64-w64-mingw32-dlltool -d ndi-sdk/Processing.NDI.Lib.x64.dll -l ndi-sdk/libndi.dll.a || \
-            echo "dlltool failed, keeping fallback libndi.dll.a"
+          # (prefixed shim for dlltool is created earlier; no silent fallback —
+          # a broken libndi.dll.a must fail the build loudly)
+          x86_64-w64-mingw32-dlltool -d ndi-sdk/Processing.NDI.Lib.x64.dll -l ndi-sdk/libndi.dll.a
           ls -la ndi-sdk
 
       - name: Configure FFmpeg
