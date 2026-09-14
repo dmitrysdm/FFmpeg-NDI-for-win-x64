@@ -20,67 +20,99 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Extract NDI SDK from installer (7-Zip, no install)
+      - name: Provision NDI SDK (innoextract, silent-install fallback)
         shell: powershell
         run: |
-          # 1) Show exactly what 7-Zip sees inside the Inno Setup installer
-          & 7z.exe l "sdk/NDI6-SDK.exe"
+          $ErrorActionPreference = "Stop"
+          $env:CI = "true"
 
-          # 2) Extract the payload (unpack the archive, do NOT install).
-          #    Inno Setup stores files in embedded "#DataStream#" chunks that
-          #    need a second extraction pass.
-          & 7z.exe x "sdk/NDI6-SDK.exe" -o"ndi-sdk-raw" -y
-          if ($LASTEXITCODE -ne 0) { throw "7z extraction failed with $LASTEXITCODE" }
-          $streams = Get-ChildItem -Path ndi-sdk-raw -Recurse -File -Filter "#DataStream#*" -ErrorAction SilentlyContinue
-          if (@($streams).Count -gt 0) {
-            Write-Host ("Found " + @($streams).Count + " embedded DataStream chunks, extracting pass 2...")
-            foreach ($s in $streams) {
-              & 7z.exe x $s.FullName -o$s.Directory.FullName -y | Out-Null
-              if ($LASTEXITCODE -ne 0) { throw "second-pass 7z extraction failed for $($s.Name) with $LASTEXITCODE" }
-              Remove-Item $s.FullName -Force
+          # --- helper: find the SDK root and stage a flat ndi-sdk/ folder ----------
+          $stageSdK = {
+            param([string]$root)
+            $hdr = Get-ChildItem -Path $root -Recurse -Filter "Processing.NDI.Lib.h" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $hdr) {
+              Write-Host "=== full tree under $root (diagnostic) ==="
+              Get-ChildItem -Path $root -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("  " + $_.FullName) }
+              throw "Processing.NDI.Lib.h not found under $root"
             }
+            $d = $hdr.Directory
+            while ($d -and -not (Test-Path (Join-Path $d.FullName "Include"))) { $d = $d.Parent }
+            if (-not $d) { throw "SDK root (dir containing Include) not found from $($hdr.FullName)" }
+            $lib = Get-ChildItem -Path $d.FullName -Recurse -Filter "Processing.NDI.Lib.x64.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+            $dll = Get-ChildItem -Path $d.FullName -Recurse -Filter "Processing.NDI.Lib.x64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $lib) { throw "Processing.NDI.Lib.x64.lib not found under $($d.FullName)" }
+            if (-not $dll) { throw "Processing.NDI.Lib.x64.dll not found under $($d.FullName)" }
+            Write-Host ("SDK root: " + $d.FullName)
+            Write-Host ("Lib: " + $lib.FullName)
+            Write-Host ("Dll: " + $dll.FullName)
+            New-Item -ItemType Directory -Force -Path ndi-sdk | Out-Null
+            Copy-Item (Join-Path $d.FullName "Include\*.h") ndi-sdk/
+            Copy-Item $lib.FullName "ndi-sdk/Processing.NDI.Lib.x64.lib"
+            Copy-Item $dll.FullName "ndi-sdk/Processing.NDI.Lib.x64.dll"
+            $ver = Get-ChildItem -Path $d.FullName -Recurse -Filter "Version.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($ver) { Copy-Item $ver.FullName ndi-sdk/Version.txt }
+            # fallback GNU import-lib alias (CI regenerates a proper one with dlltool)
+            Copy-Item $lib.FullName "ndi-sdk/libndi.dll.a"
+            Get-ChildItem ndi-sdk | Format-Table Name, Length
           }
 
-          # 3) Dump the full extracted tree (diagnostic)
-          $files = Get-ChildItem -Path ndi-sdk-raw -Recurse -File -ErrorAction SilentlyContinue
-          Write-Host ("=== Extracted file count: " + @($files).Count + " ===")
-          $files | ForEach-Object { Write-Host ("  " + $_.FullName) }
-          if (@($files).Count -eq 0) { throw "7z extracted zero files under ndi-sdk-raw" }
+          # --- primary: innoextract (unparses Inno payloads without executing) ----
+          & curl.exe -L -sS -o innoextract.zip "https://github.com/dscharrer/innoextract/releases/download/1.9/innoextract-1.9-windows.zip"
+          if ($LASTEXITCODE -ne 0) { throw "innoextract download failed" }
+          Expand-Archive -Path innoextract.zip -DestinationPath innoextract -Force
+          & .\innoextract\innoextract.exe --version
 
-          # 4) Locate the NDI header wherever 7-Zip placed it
-          $hdr = $files | Where-Object { $_.Name -eq "Processing.NDI.Lib.h" } | Select-Object -First 1
-          if (-not $hdr) { throw "Processing.NDI.Lib.h not found in the extracted installer (see tree above)" }
-          Write-Host ("Found header: " + $hdr.FullName)
+          & .\innoextract\innoextract.exe --output ndi-sdk-inno "sdk/NDI6-SDK.exe"
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "innoextract succeeded, staging SDK..."
+            & $stageSdK "ndi-sdk-inno"
+            exit 0
+          }
 
-          # 5) Anchor the SDK root: walk up from the header until a dir contains 'Include'
-          $dir = $hdr.Directory
-          while ($dir -and -not (Test-Path (Join-Path $dir.FullName "Include"))) { $dir = $dir.Parent }
-          if (-not $dir) { throw "Could not locate the SDK root (a directory containing 'Include')" }
-          $sdkRoot = $dir.FullName
-          Write-Host ("SDK root: " + $sdkRoot)
+          Write-Host "WARN: innoextract could not parse this Inno Setup version (rc=$LASTEXITCODE). Falling back to silent install on this disposable CI runner."
 
-          # 6) Find the x64 import lib and dll recursively (robust to Lib\x64 / Bin\x64 layout)
-          $lib = Get-ChildItem -Path $sdkRoot -Recurse -Filter "Processing.NDI.Lib.x64.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
-          $dll = Get-ChildItem -Path $sdkRoot -Recurse -Filter "Processing.NDI.Lib.x64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
-          $incDir = Join-Path $sdkRoot "Include"
-          if (-not (Test-Path $incDir)) { throw "Include dir missing under SDK root: $incDir" }
-          if (-not $lib) { throw "Processing.NDI.Lib.x64.lib not found under $sdkRoot" }
-          if (-not $dll) { throw "Processing.NDI.Lib.x64.dll not found under $sdkRoot" }
-          Write-Host ("Lib: " + $lib.FullName)
-          Write-Host ("Dll: " + $dll.FullName)
+          # --- fallback: silent install (Inno flags) on the disposable runner -----
+          $installDir = "C:\ndi-sdk-install"
+          & "sdk\NDI6-SDK.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR="$installDir"
+          Start-Sleep -Seconds 3
 
-          # 7) Stage a flat ndi-sdk/ folder for the rest of the build
+          # The installer may honor /DIR or default to Program Files; search both.
+          $roots = @($installDir, "C:\Program Files", "C:\Program Files (x86)") | Where-Object { Test-Path $_ }
+          $found = $null
+          foreach ($r in $roots) {
+            $h = Get-ChildItem -Path $r -Recurse -Filter "Processing.NDI.Lib.h" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($h) { $found = $h; break }
+          }
+          if (-not $found) {
+            Write-Host "=== candidate trees (diagnostic) ==="
+            foreach ($r in $roots) {
+              Write-Host "--- $r ---"
+              Get-ChildItem -Path $r -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*NDI*" } | ForEach-Object {
+                Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("  " + $_.FullName) }
+              }
+            }
+            throw "silent install did not produce Processing.NDI.Lib.h (see diagnostic above)"
+          }
+          # anchor to the dir that contains Include
+          $d = $found.Directory
+          while ($d -and -not (Test-Path (Join-Path $d.FullName "Include"))) { $d = $d.Parent }
+          if (-not $d) { throw "SDK root (dir containing Include) not found from $($found.FullName)" }
+          Write-Host "NDI SDK installed to: $($d.FullName)"
+
+          # stage flat ndi-sdk/ from the installed location
+          $lib = Get-ChildItem -Path $d.FullName -Recurse -Filter "Processing.NDI.Lib.x64.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $dll = Get-ChildItem -Path $d.FullName -Recurse -Filter "Processing.NDI.Lib.x64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $lib) { throw "Processing.NDI.Lib.x64.lib not found under $($d.FullName)" }
+          if (-not $dll) { throw "Processing.NDI.Lib.x64.dll not found under $($d.FullName)" }
           New-Item -ItemType Directory -Force -Path ndi-sdk | Out-Null
-          Copy-Item (Join-Path $incDir "*.h") ndi-sdk/
-          Copy-Item $lib.FullName  "ndi-sdk/Processing.NDI.Lib.x64.lib"
-          Copy-Item $dll.FullName  "ndi-sdk/Processing.NDI.Lib.x64.dll"
-          $ver = Get-ChildItem -Path $sdkRoot -Recurse -Filter "Version.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
+          Copy-Item (Join-Path $d.FullName "Include\*.h") ndi-sdk/
+          Copy-Item $lib.FullName "ndi-sdk/Processing.NDI.Lib.x64.lib"
+          Copy-Item $dll.FullName "ndi-sdk/Processing.NDI.Lib.x64.dll"
+          $ver = Get-ChildItem -Path $d.FullName -Recurse -Filter "Version.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($ver) { Copy-Item $ver.FullName ndi-sdk/Version.txt }
-
-          # 8) fallback GNU import-lib alias (CI regenerates a proper one with dlltool)
           Copy-Item $lib.FullName "ndi-sdk/libndi.dll.a"
-
           Get-ChildItem ndi-sdk | Format-Table Name, Length
+          Write-Host "NDI SDK provisioned via silent install fallback"
 
       - name: Show NDI SDK version
         shell: bash
