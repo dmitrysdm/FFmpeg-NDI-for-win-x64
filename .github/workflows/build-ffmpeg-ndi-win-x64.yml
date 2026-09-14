@@ -129,7 +129,7 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-nasm
-            mingw-w64-ucrt-x86_64-sdl2
+            mingw-w64-ucrt-x86_64-sdl2-compat
             mingw-w64-ucrt-x86_64-zlib
             mingw-w64-ucrt-x86_64-pkgconf
 
@@ -175,6 +175,11 @@ jobs:
             | tee configure.log
           echo "--- external libs summary ---"
           grep -A40 "^External libraries:" configure.log | grep -E "libndi_newtek|sdl2|zlib" || true
+          # hard-fail if either NDI or SDL2 (needed for ffplay) was not enabled —
+          # otherwise make would silently skip ffplay and ship a broken zip
+          grep -A40 "^External libraries:" configure.log | grep -q "libndi_newtek" || { echo "FATAL: libndi_newtek not enabled"; tail -n 40 configure.log; exit 1; }
+          grep -A40 "^External libraries:" configure.log | grep -q "sdl2"           || { echo "FATAL: sdl2 not enabled (ffplay will be missing)"; tail -n 40 configure.log; exit 1; }
+          echo "OK: libndi_newtek + sdl2 enabled"
 
       - name: Build FFmpeg
         shell: msys2 {0}
@@ -185,8 +190,12 @@ jobs:
         shell: msys2 {0}
         working-directory: ffmpeg
         run: |
+          test -f ffmpeg.exe  || { echo "FATAL: ffmpeg.exe missing";  exit 1; }
+          test -f ffprobe.exe || { echo "FATAL: ffprobe.exe missing"; exit 1; }
+          test -f ffplay.exe  || { echo "FATAL: ffplay.exe missing (SDL2 not linked?)"; exit 1; }
           ./ffmpeg.exe -version
           ./ffprobe.exe -version | head -1
+          ./ffplay.exe -version | head -1
           x86_64-w64-mingw32-objdump -p ffmpeg.exe | grep -i "Processing.NDI" || echo "WARN: NDI import not found"
 
       - name: Verify NDI devices are registered
@@ -247,7 +256,7 @@ jobs:
           if (Test-Path ffmpeg/ndi-sdk/Version.txt) { Copy-Item ffmpeg/ndi-sdk/Version.txt $pkg/ }
 
           $ucrtBin = Join-Path $env:MSYS2_ROOT "ucrt64/bin"
-          foreach ($d in @("SDL2.dll","libgcc_s_seh-1.dll","libwinpthread-1.dll","libstdc++-6.dll")) {
+          foreach ($d in @("SDL3.dll","SDL2.dll","libgcc_s_seh-1.dll","libwinpthread-1.dll","libstdc++-6.dll")) {
             $src = Join-Path $ucrtBin $d
             if (Test-Path $src) { Copy-Item $src $pkg/ } else { Write-Host "note: $d not found in ucrt64/bin" }
           }
