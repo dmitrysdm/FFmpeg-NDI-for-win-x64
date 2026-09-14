@@ -1,0 +1,213 @@
+name: build-ffmpeg-ndi-win-x64
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FFMPEG_TAG: n9.0.1
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract NDI SDK from installer (7-Zip, no install)
+        shell: powershell
+        run: |
+          & 7z.exe x "sdk/NDI6-SDK.exe" -o"ndi-sdk-raw" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z extraction failed with $LASTEXITCODE" }
+
+          $hdr = Get-ChildItem -Path ndi-sdk-raw -Recurse -Filter "Processing.NDI.Lib.h" | Select-Object -First 1
+          if (-not $hdr) { throw "Processing.NDI.Lib.h not found in extracted installer" }
+          $sdkRoot = $hdr.Directory.Parent
+          Write-Host "SDK root: $($sdkRoot.FullName)"
+          Get-ChildItem -Path $sdkRoot -Recurse -File | ForEach-Object { Write-Host ("  " + $_.FullName.Substring($sdkRoot.FullName.Length)) }
+
+          $incDir = Join-Path $sdkRoot "Include"
+          $lib    = Join-Path $sdkRoot "Lib\x64\Processing.NDI.Lib.x64.lib"
+          $dll    = Join-Path $sdkRoot "Bin\x64\Processing.NDI.Lib.x64.dll"
+          foreach ($f in @($incDir, $lib, $dll)) {
+            if (-not (Test-Path $f)) { throw "Missing expected SDK file: $f" }
+          }
+
+          New-Item -ItemType Directory -Force -Path ndi-sdk | Out-Null
+          Copy-Item (Join-Path $incDir "*.h") ndi-sdk/
+          Copy-Item $lib  "ndi-sdk/Processing.NDI.Lib.x64.lib"
+          Copy-Item (Join-Path $sdkRoot "Bin\x64\*.dll") ndi-sdk/
+          $ver = Get-ChildItem -Path $sdkRoot -Recurse -Filter "Version.txt" | Select-Object -First 1
+          if ($ver) { Copy-Item $ver.FullName ndi-sdk/Version.txt }
+
+          # GNU import-lib alias so configure's "-lndi" resolves
+          Copy-Item $lib "ndi-sdk/libndi.dll.a"
+
+          Get-ChildItem ndi-sdk | Format-Table Name, Length
+
+      - name: Show NDI SDK version
+        shell: bash
+        run: cat ndi-sdk/Version.txt 2>/dev/null || echo "(no Version.txt)"
+
+      - name: Setup MSYS2 (ucrt64 cross toolchain)
+        uses: msys2/setup-msys2@v2
+        with:
+          msys2-arch: ucrt64
+          msys2-update: false
+          install: >-
+            make
+            patch
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-nasm
+            mingw-w64-ucrt-x86_64-sdl2
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-pkgconf
+
+      - name: Clone FFmpeg ${{ env.FFMPEG_TAG }}
+        shell: bash
+        run: git clone --depth 1 -b ${{ env.FFMPEG_TAG }} https://github.com/FFmpeg/FFmpeg.git ffmpeg
+
+      - name: Apply NDI patch and stage NDI SDK into ffmpeg tree
+        shell: msys2 {0}
+        working-directory: ffmpeg
+        run: |
+          sed 's/\r$//' ../ndi-patch/ffmpeg_9.0-add_ndi.patch | patch -Np1
+          cp ../ndi-patch/libavdevice/libndi_newtek_common.h libavdevice/
+          cp ../ndi-patch/libavdevice/libndi_newtek_dec.c    libavdevice/
+          cp ../ndi-patch/libavdevice/libndi_newtek_enc.c    libavdevice/
+          mkdir -p ndi-sdk
+          cp ../ndi-sdk/* ndi-sdk/
+          ls ndi-sdk
+
+      - name: Configure FFmpeg
+        shell: msys2 {0}
+        working-directory: ffmpeg
+        env:
+          PKG_CONFIG_PATH: ${{ env.MSYS2_ROOT }}/ucrt64/lib/pkgconfig
+        run: |
+          ./configure \
+            --cross-prefix=x86_64-w64-mingw32- \
+            --target-os=win32 \
+            --arch=x86_64 \
+            --enable-cross-compile \
+            --enable-nonfree \
+            --enable-gpl \
+            --enable-static \
+            --disable-shared \
+            --disable-doc \
+            --disable-network \
+            --disable-debug \
+            --enable-libndi_newtek \
+            --extra-cflags="-I`pwd`/ndi-sdk" \
+            --extra-libs="-L`pwd`/ndi-sdk" \
+            | tee configure.log
+          echo "--- external libs summary ---"
+          grep -A40 "^External libraries:" configure.log | grep -E "libndi_newtek|sdl2|zlib" || true
+
+      - name: Build FFmpeg
+        shell: msys2 {0}
+        working-directory: ffmpeg
+        run: make -j2
+
+      - name: Version and NDI import check
+        shell: msys2 {0}
+        working-directory: ffmpeg
+        run: |
+          ./ffmpeg.exe -version
+          ./ffprobe.exe -version | head -1
+          objdump -p ffmpeg.exe | grep -i "Processing.NDI" || echo "WARN: NDI import not found"
+
+      - name: Verify NDI devices are registered
+        shell: msys2 {0}
+        working-directory: ffmpeg
+        run: |
+          cp ndi-sdk/*.dll .
+          ./ffmpeg.exe -hide_banner -devices 2>&1 | tee ../devices.log
+          grep -q "libndi_newtek" ../devices.log || { echo "libndi_newtek missing from -devices"; exit 1; }
+          echo "OK: NDI in/out devices registered"
+
+      - name: NDI loopback test (transmit -> receive -> decode)
+        shell: msys2 {0}
+        working-directory: ffmpeg
+        run: |
+          # 1) local NDI source: 256x144 UYVY 25fps + 44.1 kHz sine, PCM s16
+          ./ffmpeg.exe -hide_banner -loglevel error -y \
+            -f lavfi -i "testsrc=size=256x144:rate=25" \
+            -f lavfi -i "sine=frequency=440:sample_rate=44100" \
+            -map 0:v -map 1:a \
+            -c:v wrapped_avframe -pix_fmt uyvy422 -c:a pcm_s16le \
+            -f libndi_newtek "hermes_ci_source" \
+            > transmit.log 2>&1 &
+          TX_PID=$!
+          sleep 5
+          if ! kill -0 $TX_PID 2>/dev/null; then
+            echo "transmitter died early:"; cat transmit.log; exit 1
+          fi
+
+          # 2) capture it back (max 90 s)
+          timeout 90 ./ffmpeg.exe -hide_banner -loglevel info -y \
+            -i "hermes_ci_source" -t 5 -c copy out.mkv > receive.log 2>&1
+          RC=$?
+          kill $TX_PID 2>/dev/null || true
+          wait $TX_PID 2>/dev/null || true
+          echo "receive rc=$RC"
+          tail -n 15 receive.log
+          [ $RC -eq 0 ] || { echo "loopback capture failed"; exit 1; }
+
+          # 3) verify content: rawvideo + pcm_s16le streams, real frames
+          ./ffmpeg.exe -hide_banner -i out.mkv 2>&1 | tee outinfo.log
+          grep -q "rawvideo"  outinfo.log || { echo "no rawvideo stream"; exit 1; }
+          grep -q "pcm_s16le" outinfo.log || { echo "no pcm audio stream"; exit 1; }
+          FRAMES=$(./ffmpeg.exe -hide_banner -count_frames -i out.mkv -map 0:v -f null - 2>&1 | grep -oE 'frame=[ ]*[0-9]+' | tail -1 | grep -oE '[0-9]+')
+          echo "decoded video frames: ${FRAMES:-0}"
+          [ "${FRAMES:-0}" -ge 25 ] || { echo "too few frames decoded (${FRAMES:-0})"; exit 1; }
+          echo "NDI LOOPBACK OK"
+
+      - name: Package binaries
+        shell: powershell
+        run: |
+          $pkg = "ffmpeg-9.0.1-ndi-win-x64"
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          Copy-Item ffmpeg/ffmpeg.exe  $pkg/
+          Copy-Item ffmpeg/ffprobe.exe $pkg/
+          Copy-Item ffmpeg/ffplay.exe  $pkg/
+          Copy-Item ffmpeg/ndi-sdk/*.dll $pkg/
+          if (Test-Path ffmpeg/ndi-sdk/Version.txt) { Copy-Item ffmpeg/ndi-sdk/Version.txt $pkg/ }
+
+          $ucrtBin = Join-Path $env:MSYS2_ROOT "ucrt64/bin"
+          foreach ($d in @("SDL2.dll","libgcc_s_seh-1.dll","libwinpthread-1.dll","libstdc++-6.dll")) {
+            $src = Join-Path $ucrtBin $d
+            if (Test-Path $src) { Copy-Item $src $pkg/ } else { Write-Host "note: $d not found in ucrt64/bin" }
+          }
+          Copy-Item README.md $pkg/
+
+          Get-ChildItem $pkg | Format-Table Name, Length
+          Compress-Archive -Path $pkg -DestinationPath "ffmpeg-9.0.1-ndi-win-x64.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-9.0.1-ndi-win-x64
+          path: |
+            ffmpeg-9.0.1-ndi-win-x64.zip
+            ffmpeg/devices.log
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (manual runs only)
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ffmpeg-9.0.1-ndi-win-x64-${{ github.run_number }}
+          name: FFmpeg 9.0.1 + NDI (win-x64) — run ${{ github.run_number }}
+          files: |
+            ffmpeg-9.0.1-ndi-win-x64.zip
+            ffmpeg/devices.log
+          draft: false
+          prerelease: true
+          generate_release_notes: true
