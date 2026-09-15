@@ -130,6 +130,7 @@ jobs:
             make
             patch
             diffutils
+            coreutils
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-nasm
