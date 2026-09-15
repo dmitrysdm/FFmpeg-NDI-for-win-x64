@@ -134,6 +134,7 @@ jobs:
             mingw-w64-ucrt-x86_64-nasm
             mingw-w64-ucrt-x86_64-zlib
             mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-python
 
       - name: Install SDL2 (compat) via freshly-synced pacman DB
         shell: msys2 {0}
@@ -210,7 +211,12 @@ jobs:
           DLL=ndi-sdk/Processing.NDI.Lib.x64.dll
           DEF=ndi-sdk/ndi-exports.def
           rm -f ndi-sdk/libndi.dll.a   # drop the PE-.lib copy staged as a fallback
-          python - "$DLL" "$DEF" <<'PYEOF'
+          # the ucrt64 'python' package ships /ucrt64/bin/python.exe; keep a
+          # fallback for runners where only python3 resolves
+          command -v python >/dev/null || command -v python3 >/dev/null \
+            || { echo "FATAL: no python interpreter in msys2 shell"; exit 1; }
+          PYTHON_BIN=$(command -v python || command -v python3)
+          "$PYTHON_BIN" - "$DLL" "$DEF" <<'PYEOF'
           import struct, sys
           dll_path, def_path = sys.argv[1], sys.argv[2]
           d = open(dll_path, 'rb').read()
@@ -262,7 +268,9 @@ jobs:
             exit 1
           fi
           echo "NDI exports extracted: $NEXP"
-          x86_64-w64-mingw32-dlltool --kill-at --no-idata \
+          # NOTE: no --no-idata — that suppresses the .idata section and with it
+          # the __imp_* definitions the link line resolves against.
+          x86_64-w64-mingw32-dlltool --kill-at \
               -d "$DEF" -l ndi-sdk/libndi.dll.a -D "Processing.NDI.Lib.x64.dll" \
             || { echo "FATAL: dlltool failed"; head -20 "$DEF"; exit 1; }
           # the import lib must actually define the __imp_ stubs the code references
