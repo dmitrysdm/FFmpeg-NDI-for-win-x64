@@ -432,7 +432,12 @@ jobs:
           ./ffmpeg.exe -hide_banner -i out.mkv 2>&1 | tee outinfo.log
           grep -q "rawvideo"  outinfo.log || { echo "no rawvideo stream"; exit 1; }
           grep -q "pcm_s16le" outinfo.log || { echo "no pcm audio stream"; exit 1; }
-          FRAMES=$(./ffmpeg.exe -hide_banner -count_frames -i out.mkv -map 0:v -f null - 2>&1 | grep -oE 'frame=[ ]*[0-9]+' | tail -1 | grep -oE '[0-9]+')
+          # Count frames with ffprobe (no output file needed; `ffmpeg -f null -`
+          # is rejected by the Windows build: "At least one output file must be
+          # specified"). -v error => stdout is just the frame count.
+          FRAMES=$(./ffprobe.exe -v error -count_frames -select_streams v:0 \
+            -show_entries stream=nb_read_frames -of default=nw=1:nk=1 out.mkv 2>/dev/null)
+          FRAMES=${FRAMES//[!0-9]/}
           echo "decoded video frames: ${FRAMES:-0}"
           [ "${FRAMES:-0}" -ge 25 ] || { echo "too few frames decoded (${FRAMES:-0})"; exit 1; }
           echo "NDI LOOPBACK OK"
