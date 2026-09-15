@@ -203,23 +203,62 @@ jobs:
           # dlltool's -d takes a DEF file, NOT a DLL — passing the DLL gives
           # 'Syntax error in def file ...:0' plus a stub libndi.dll.a, and the
           # final link then dies on undefined __imp_NDIlib_*. Correct flow:
-          # extract the export table from the DLL with objdump -> def -> dlltool.
+          # extract the export table from the DLL -> def -> dlltool.
+          # We parse the PE export table directly in Python (stdlib only)
+          # instead of text-scraping `objdump -p` — that output format has
+          # changed across binutils versions and broke the awk parse.
           DLL=ndi-sdk/Processing.NDI.Lib.x64.dll
           DEF=ndi-sdk/ndi-exports.def
           rm -f ndi-sdk/libndi.dll.a   # drop the PE-.lib copy staged as a fallback
-          {
-            echo "LIBRARY \"Processing.NDI.Lib.x64.dll\""
-            echo "EXPORTS"
-            x86_64-w64-mingw32-objdump -p "$DLL" | awk '
-              /\[Ordinal\/Name Pointer\]/ { f=1; next }
-              f && $1 ~ /^\[ *[0-9]+\]$/ { print "  " $NF; next }
-              f { f=0 }
-            '
-          } > "$DEF"
+          python - "$DLL" "$DEF" <<'PYEOF'
+          import struct, sys
+          dll_path, def_path = sys.argv[1], sys.argv[2]
+          d = open(dll_path, 'rb').read()
+          pe = struct.unpack_from('<I', d, 0x3C)[0]
+          assert d[pe:pe+4] == b'PE\x00\x00', "not PE"
+          nsec   = struct.unpack_from('<H', d, pe+6)[0]
+          opthsz = struct.unpack_from('<H', d, pe+20)[0]
+          opt    = pe + 24
+          magic  = struct.unpack_from('<H', d, opt)[0]
+          dd     = opt + (112 if magic == 0x20b else 96)
+          exp_rva, _ = struct.unpack_from('<II', d, dd)
+          if not exp_rva:
+              sys.exit("no export directory")
+          sec_off = opt + opthsz
+          secs = []
+          for i in range(nsec):
+              o = sec_off + i*40
+              vsize, va, rawsz, rawptr = struct.unpack_from('<IIII', d, o+8)
+              secs.append((va, vsize, rawptr))
+          def va2off(va):
+              for (s_va, s_vs, ro) in secs:
+                  if s_vs and s_va <= va < s_va + s_vs:
+                      return ro + (va - s_va)
+              return None
+          er = va2off(exp_rva)
+          if er is None:
+              sys.exit(f"export RVA {exp_rva:#x} not mapped")
+          # IMAGE_EXPORT_DIRECTORY (NO magic field — first DWORD is Characteristics)
+          nfunc   = struct.unpack_from('<I', d, er+20)[0]
+          nnames  = struct.unpack_from('<I', d, er+24)[0]
+          names_rva = struct.unpack_from('<I', d, er+32)[0]
+          names = va2off(names_rva)
+          out = []
+          for i in range(nnames):
+              rva = struct.unpack_from('<I', d, names + 4*i)[0]
+              o = va2off(rva)
+              e = d.index(b'\0', o)
+              out.append(d[o:e].decode('utf-8', 'replace'))
+          with open(def_path, 'w', newline='') as f:
+              f.write('LIBRARY "Processing.NDI.Lib.x64.dll"\nEXPORTS\n')
+              for s in out:
+                  f.write('  ' + s + '\n')
+          print(f"parsed {len(out)} exports from {dll_path}")
+          PYEOF
           NEXP=$(grep -c '^  ' "$DEF" || true)
           if [ "$NEXP" -lt 20 ]; then
-            echo "FATAL: only $NEXP NDI exports extracted from $DLL — dumping the export section for diagnosis:"
-            x86_64-w64-mingw32-objdump -p "$DLL" | grep -A 80 -E "Export Address Table|Ordinal" | head -90 || true
+            echo "FATAL: only $NEXP NDI exports extracted from $DLL"
+            head -20 "$DEF"
             exit 1
           fi
           echo "NDI exports extracted: $NEXP"
