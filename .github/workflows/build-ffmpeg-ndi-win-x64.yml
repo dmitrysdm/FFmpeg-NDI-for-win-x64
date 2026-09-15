@@ -387,9 +387,13 @@ jobs:
 
           # 2) capture it back; -t 5 self-terminates after 5 s of output. The bash
           #    watchdog below is only a safety net for a hang (source never found).
-          #    extra_ips forces unicast discovery on loopback.
+          #    extra_ips forces unicast discovery on loopback. NOTE: -f libndi_newtek
+          #    is REQUIRED on the input side too — without it ffmpeg treats the
+          #    source name as a filename ("Error opening input: No such file or
+          #    directory"). Input options must precede -i.
           ./ffmpeg.exe -hide_banner -loglevel info -y \
-            -i "hermes_ci_source" -extra_ips 127.0.0.1 -t 5 -c copy out.mkv > receive.log 2>&1 &
+            -f libndi_newtek -extra_ips 127.0.0.1 -i "hermes_ci_source" \
+            -t 5 -c copy out.mkv > receive.log 2>&1 &
           RX_PID=$!
           for i in $(seq 1 120); do
             if ! kill -0 $RX_PID 2>/dev/null; then break; fi
