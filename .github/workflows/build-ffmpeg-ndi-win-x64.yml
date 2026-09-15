@@ -119,6 +119,7 @@ jobs:
         run: cat ndi-sdk/Version.txt 2>/dev/null || echo "(no Version.txt)"
 
       - name: Setup MSYS2 (ucrt64 cross toolchain)
+        id: msys2
         # NOTE: the action's input is 'msystem' (NOT 'msys2-arch'); with the wrong
         # name it is silently ignored and the action defaults to MSYSTEM=MINGW64,
         # putting /mingw64/bin (not /ucrt64/bin) on PATH -> 'command not found'
@@ -137,6 +138,18 @@ jobs:
             mingw-w64-ucrt-x86_64-zlib
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-python
+
+      # The action only exports MSYSTEM globally; MSYS2_ROOT is not a global
+      # env var, so PowerShell steps (e.g. Package binaries) see it as null.
+      # Publish the Windows root path (the action's msys2-location output) as
+      # MSYS2_ROOT for every following step.
+      - name: Export MSYS2_ROOT for later (non-msys2) steps
+        shell: powershell
+        run: |
+          $root = "${{ steps.msys2.outputs.msys2-location }}"
+          if (-not $root) { throw "msys2-location output is empty" }
+          Add-Content $env:GITHUB_ENV "MSYS2_ROOT=$root"
+          Write-Host "MSYS2_ROOT exported: $root"
 
       - name: Install SDL2 (compat) via freshly-synced pacman DB
         shell: msys2 {0}
