@@ -378,28 +378,38 @@ jobs:
           #    -find_sources lists discovered sources and exits rc=0, so we can
           #    poll it in a loop instead of racing.
           SRC_UP=0
+          SRC_NAME=""
           for i in $(seq 1 60); do
             if ! kill -0 $TX_PID 2>/dev/null; then
               echo "transmitter died early:"; cat transmit.log; exit 1
             fi
             # -find_sources lists discovered sources (logged at INFO — hence
-            # -loglevel info) and exits. Probe is ~1-2 s (1 s NDI wait inside).
+            # -loglevel info) and exits. Note: the CLI parses wait_sources in
+            # SECONDS (range 0.1–20), not the raw microseconds of the AVOption.
+            # 10 s per probe is plenty for the source to appear; the loop retries.
             ./ffmpeg.exe -hide_banner -loglevel info -y \
-              -f libndi_newtek -find_sources 1 -extra_ips 127.0.0.1 -i "dummy" \
+              -f libndi_newtek -find_sources 1 -wait_sources 10 -extra_ips 127.0.0.1 -i "dummy" \
               > discover.log 2>&1
-            if grep -q "hermes_ci_source" discover.log; then SRC_UP=1; break; fi
+            if grep -q "hermes_ci_source" discover.log; then
+              SRC_UP=1
+              # NDI registers the source as "<machine> (<source>)" — the demuxer
+              # matches the URL against p_ndi_name EXACTLY, so capture the real
+              # name from the "Found NDI sources" listing (first quoted field).
+              SRC_NAME=$(grep -oE "'[^']*hermes_ci_source[^']*'" discover.log | head -1 | tr -d "'")
+              break
+            fi
             sleep 1
           done
-          if [ $SRC_UP -ne 1 ]; then
+          if [ $SRC_UP -ne 1 ] || [ -z "$SRC_NAME" ]; then
             echo "source never discovered; last discovery output:"
             cat discover.log; echo "transmit.log:"; tail -n 15 transmit.log; exit 1
           fi
-          echo "source 'hermes_ci_source' discovered after ${i}s:"
-          grep "hermes_ci_source" discover.log | head -3
+          echo "source discovered after ${i}s — actual NDI name: '$SRC_NAME'"
 
           # 3) capture it back; -t 5 self-terminates after 5 s of output.
+          #    wait_sources is in SECONDS here (max 20).
           ./ffmpeg.exe -hide_banner -loglevel info -y \
-            -f libndi_newtek -wait_sources 20000000 -extra_ips 127.0.0.1 -i "hermes_ci_source" \
+            -f libndi_newtek -wait_sources 20 -extra_ips 127.0.0.1 -i "$SRC_NAME" \
             -t 5 -c copy out.mkv > receive.log 2>&1 &
           RX_PID=$!
           for i in $(seq 1 120); do
