@@ -356,19 +356,10 @@ jobs:
         working-directory: ffmpeg
         run: |
           # The msys2 custom shell runs bash with -e (errexit). A single failing
-          # line aborts the whole script BEFORE the later diagnostic echoes run,
-          # which is why earlier attempts printed nothing and just showed a bare
-          # 127. Disable errexit for this step and always print the logs so a real
-          # NDI error is visible. Also: do NOT rely on the coreutils `timeout`
-          # binary (its "command not found" stderr was redirected into receive.log,
-          # hiding it). Use a pure-bash watchdog (sleep/kill/wait only).
+          # line aborts the whole script BEFORE the later diagnostic echoes run.
+          # Disable errexit for this step and always print the logs. Do NOT rely
+          # on the coreutils `timeout` binary; use a pure-bash watchdog.
           set +e
-
-          echo "=== preflight ==="
-          command -v timeout && echo "timeout: present" || echo "timeout: ABSENT (using bash watchdog)"
-          ls -la *.exe *.dll
-          ./ffmpeg.exe -version 2>&1 | head -1
-          echo "==================="
 
           # 1) local NDI source: 256x144 UYVY 25fps + 44.1 kHz sine, PCM s16
           ./ffmpeg.exe -hide_banner -loglevel error -y \
@@ -379,20 +370,36 @@ jobs:
             -f libndi_newtek "hermes_ci_source" \
             > transmit.log 2>&1 &
           TX_PID=$!
-          sleep 5
-          if ! kill -0 $TX_PID 2>/dev/null; then
-            echo "transmitter died early:"; cat transmit.log; exit 1
-          fi
-          echo "transmitter alive (pid $TX_PID); capturing..."
 
-          # 2) capture it back; -t 5 self-terminates after 5 s of output. The bash
-          #    watchdog below is only a safety net for a hang (source never found).
-          #    extra_ips forces unicast discovery on loopback. NOTE: -f libndi_newtek
-          #    is REQUIRED on the input side too — without it ffmpeg treats the
-          #    source name as a filename ("Error opening input: No such file or
-          #    directory"). Input options must precede -i.
+          # 2) WAIT for the source to actually be discoverable. The demuxer's
+          #    wait_sources default is only 1 s, and NDI source registration
+          #    (ffmpeg.exe load + NDI init + source announce) can take longer —
+          #    a same-instant receiver then finds 0 sources -> "No such device".
+          #    -find_sources lists discovered sources and exits rc=0, so we can
+          #    poll it in a loop instead of racing.
+          SRC_UP=0
+          for i in $(seq 1 60); do
+            if ! kill -0 $TX_PID 2>/dev/null; then
+              echo "transmitter died early:"; cat transmit.log; exit 1
+            fi
+            # -find_sources lists discovered sources (logged at INFO — hence
+            # -loglevel info) and exits. Probe is ~1-2 s (1 s NDI wait inside).
+            ./ffmpeg.exe -hide_banner -loglevel info -y \
+              -f libndi_newtek -find_sources 1 -extra_ips 127.0.0.1 -i "dummy" \
+              > discover.log 2>&1
+            if grep -q "hermes_ci_source" discover.log; then SRC_UP=1; break; fi
+            sleep 1
+          done
+          if [ $SRC_UP -ne 1 ]; then
+            echo "source never discovered; last discovery output:"
+            cat discover.log; echo "transmit.log:"; tail -n 15 transmit.log; exit 1
+          fi
+          echo "source 'hermes_ci_source' discovered after ${i}s:"
+          grep "hermes_ci_source" discover.log | head -3
+
+          # 3) capture it back; -t 5 self-terminates after 5 s of output.
           ./ffmpeg.exe -hide_banner -loglevel info -y \
-            -f libndi_newtek -extra_ips 127.0.0.1 -i "hermes_ci_source" \
+            -f libndi_newtek -wait_sources 20000000 -extra_ips 127.0.0.1 -i "hermes_ci_source" \
             -t 5 -c copy out.mkv > receive.log 2>&1 &
           RX_PID=$!
           for i in $(seq 1 120); do
