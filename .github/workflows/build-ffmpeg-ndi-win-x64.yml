@@ -212,12 +212,16 @@ jobs:
             echo "EXPORTS"
             x86_64-w64-mingw32-objdump -p "$DLL" | awk '
               /\[Ordinal\/Name Pointer\]/ { f=1; next }
-              f && $1 ~ /^\[[0-9]+\]$/ { print "  " $NF; next }
+              f && $1 ~ /^\[ *[0-9]+\]$/ { print "  " $NF; next }
               f { f=0 }
             '
           } > "$DEF"
           NEXP=$(grep -c '^  ' "$DEF" || true)
-          [ "$NEXP" -ge 20 ] || { echo "FATAL: only $NEXP NDI exports extracted from $DLL"; head -5 "$DEF"; exit 1; }
+          if [ "$NEXP" -lt 20 ]; then
+            echo "FATAL: only $NEXP NDI exports extracted from $DLL — dumping the export section for diagnosis:"
+            x86_64-w64-mingw32-objdump -p "$DLL" | grep -A 80 -E "Export Address Table|Ordinal" | head -90 || true
+            exit 1
+          fi
           echo "NDI exports extracted: $NEXP"
           x86_64-w64-mingw32-dlltool --kill-at --no-idata \
               -d "$DEF" -l ndi-sdk/libndi.dll.a -D "Processing.NDI.Lib.x64.dll" \
