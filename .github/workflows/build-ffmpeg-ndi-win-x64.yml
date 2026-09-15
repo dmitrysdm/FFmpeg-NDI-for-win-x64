@@ -355,6 +355,21 @@ jobs:
         shell: msys2 {0}
         working-directory: ffmpeg
         run: |
+          # The msys2 custom shell runs bash with -e (errexit). A single failing
+          # line aborts the whole script BEFORE the later diagnostic echoes run,
+          # which is why earlier attempts printed nothing and just showed a bare
+          # 127. Disable errexit for this step and always print the logs so a real
+          # NDI error is visible. Also: do NOT rely on the coreutils `timeout`
+          # binary (its "command not found" stderr was redirected into receive.log,
+          # hiding it). Use a pure-bash watchdog (sleep/kill/wait only).
+          set +e
+
+          echo "=== preflight ==="
+          command -v timeout && echo "timeout: present" || echo "timeout: ABSENT (using bash watchdog)"
+          ls -la *.exe *.dll
+          ./ffmpeg.exe -version 2>&1 | head -1
+          echo "==================="
+
           # 1) local NDI source: 256x144 UYVY 25fps + 44.1 kHz sine, PCM s16
           ./ffmpeg.exe -hide_banner -loglevel error -y \
             -f lavfi -i "testsrc=size=256x144:rate=25" \
@@ -368,15 +383,28 @@ jobs:
           if ! kill -0 $TX_PID 2>/dev/null; then
             echo "transmitter died early:"; cat transmit.log; exit 1
           fi
+          echo "transmitter alive (pid $TX_PID); capturing..."
 
-          # 2) capture it back (max 90 s); extra_ips forces unicast discovery on loopback
-          timeout 90 ./ffmpeg.exe -hide_banner -loglevel info -y \
-            -i "hermes_ci_source" -extra_ips 127.0.0.1 -t 5 -c copy out.mkv > receive.log 2>&1
-          RC=$?
+          # 2) capture it back; -t 5 self-terminates after 5 s of output. The bash
+          #    watchdog below is only a safety net for a hang (source never found).
+          #    extra_ips forces unicast discovery on loopback.
+          ./ffmpeg.exe -hide_banner -loglevel info -y \
+            -i "hermes_ci_source" -extra_ips 127.0.0.1 -t 5 -c copy out.mkv > receive.log 2>&1 &
+          RX_PID=$!
+          for i in $(seq 1 120); do
+            if ! kill -0 $RX_PID 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if kill -0 $RX_PID 2>/dev/null; then
+            echo "receiver still running after 120s (hang) — killing"
+            kill $RX_PID 2>/dev/null
+          fi
+          wait $RX_PID; RC=$?
           kill $TX_PID 2>/dev/null || true
           wait $TX_PID 2>/dev/null || true
           echo "receive rc=$RC"
-          tail -n 15 receive.log
+          echo "===== receive.log (tail) ====="; tail -n 25 receive.log
+          echo "===== transmit.log (tail) ====="; tail -n 15 transmit.log
           [ $RC -eq 0 ] || { echo "loopback capture failed"; exit 1; }
 
           # 3) verify content: rawvideo + pcm_s16le streams, real frames
@@ -417,6 +445,17 @@ jobs:
             ffmpeg-9.0.1-ndi-win-x64.zip
             ffmpeg/devices.log
           if-no-files-found: error
+
+      - name: Upload loopback test logs (diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ndi-loopback-logs
+          path: |
+            ffmpeg/transmit.log
+            ffmpeg/receive.log
+            ffmpeg/outinfo.log
+          if-no-files-found: ignore
 
       - name: Publish GitHub Release (manual runs only)
         if: github.event_name == 'workflow_dispatch'
