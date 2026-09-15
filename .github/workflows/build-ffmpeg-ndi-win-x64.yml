@@ -129,6 +129,7 @@ jobs:
           install: >-
             make
             patch
+            diffutils
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-nasm
@@ -319,6 +320,19 @@ jobs:
         shell: msys2 {0}
         working-directory: ffmpeg
         run: |
+          # The exes are native Windows PEs. When launched from the msys2 shell
+          # their Windows loader only searches the exe's own dir + the Windows
+          # PATH. ffmpeg.exe imports Processing.NDI.Lib.x64.dll (it links -lndi)
+          # which lives in ndi-sdk/ — not on that search path — so the loader
+          # fails before any output -> MSYS2 'cannot open shared object file' ->
+          # exit 127. Stage the full runtime DLL set next to the exes (identical
+          # layout to the shipped zip) so every dependency resolves.
+          B="${MSYS2_ROOT//\\//}/ucrt64/bin"
+          cp -f ndi-sdk/Processing.NDI.Lib.x64.dll .
+          for d in SDL3.dll SDL2.dll libgcc_s_seh-1.dll libwinpthread-1.dll libstdc++-6.dll; do
+            if [ -f "$B/$d" ]; then cp -f "$B/$d" .; else echo "note: $d not in ucrt64/bin"; fi
+          done
+          ls -la *.dll
           test -f ffmpeg.exe  || { echo "FATAL: ffmpeg.exe missing";  exit 1; }
           test -f ffprobe.exe || { echo "FATAL: ffprobe.exe missing"; exit 1; }
           test -f ffplay.exe  || { echo "FATAL: ffplay.exe missing (SDL2 not linked?)"; exit 1; }
