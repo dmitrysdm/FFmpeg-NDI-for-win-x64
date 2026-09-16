@@ -20,99 +20,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Provision NDI SDK (innoextract, silent-install fallback)
+      - name: Provision NDI SDK (innoextract)
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          $env:CI = "true"
-
-          # --- helper: find the SDK root and stage a flat ndi-sdk/ folder ----------
-          $stageSdK = {
-            param([string]$root)
-            $hdr = Get-ChildItem -Path $root -Recurse -Filter "Processing.NDI.Lib.h" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $hdr) {
-              Write-Host "=== full tree under $root (diagnostic) ==="
-              Get-ChildItem -Path $root -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("  " + $_.FullName) }
-              throw "Processing.NDI.Lib.h not found under $root"
-            }
-            $d = $hdr.Directory
-            while ($d -and -not (Test-Path (Join-Path $d.FullName "Include"))) { $d = $d.Parent }
-            if (-not $d) { throw "SDK root (dir containing Include) not found from $($hdr.FullName)" }
-            $lib = Get-ChildItem -Path $d.FullName -Recurse -Filter "Processing.NDI.Lib.x64.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
-            $dll = Get-ChildItem -Path $d.FullName -Recurse -Filter "Processing.NDI.Lib.x64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $lib) { throw "Processing.NDI.Lib.x64.lib not found under $($d.FullName)" }
-            if (-not $dll) { throw "Processing.NDI.Lib.x64.dll not found under $($d.FullName)" }
-            Write-Host ("SDK root: " + $d.FullName)
-            Write-Host ("Lib: " + $lib.FullName)
-            Write-Host ("Dll: " + $dll.FullName)
-            New-Item -ItemType Directory -Force -Path ndi-sdk | Out-Null
-            Copy-Item (Join-Path $d.FullName "Include\*.h") ndi-sdk/
-            Copy-Item $lib.FullName "ndi-sdk/Processing.NDI.Lib.x64.lib"
-            Copy-Item $dll.FullName "ndi-sdk/Processing.NDI.Lib.x64.dll"
-            $ver = Get-ChildItem -Path $d.FullName -Recurse -Filter "Version.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($ver) { Copy-Item $ver.FullName ndi-sdk/Version.txt }
-            # fallback GNU import-lib alias (CI regenerates a proper one with dlltool)
-            Copy-Item $lib.FullName "ndi-sdk/libndi.dll.a"
-            Get-ChildItem ndi-sdk | Format-Table Name, Length
-          }
-
-          # --- primary: innoextract (unparses Inno payloads without executing) ----
+          # The SDK ships as a vendored Inno Setup installer (sdk/NDI6-SDK.exe).
+          # innoextract unparses the payload without executing anything.
           & curl.exe -L -sS -o innoextract.zip "https://github.com/dscharrer/innoextract/releases/download/1.9/innoextract-1.9-windows.zip"
           if ($LASTEXITCODE -ne 0) { throw "innoextract download failed" }
           Expand-Archive -Path innoextract.zip -DestinationPath innoextract -Force
-          & .\innoextract\innoextract.exe --version
-
           & .\innoextract\innoextract.exe --output ndi-sdk-inno "sdk/NDI6-SDK.exe"
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "innoextract succeeded, staging SDK..."
-            & $stageSdK "ndi-sdk-inno"
-            exit 0
-          }
+          if ($LASTEXITCODE -ne 0) { throw "innoextract failed to parse sdk/NDI6-SDK.exe (rc=$LASTEXITCODE)" }
 
-          Write-Host "WARN: innoextract could not parse this Inno Setup version (rc=$LASTEXITCODE). Falling back to silent install on this disposable CI runner."
-
-          # --- fallback: silent install (Inno flags) on the disposable runner -----
-          $installDir = "C:\ndi-sdk-install"
-          & "sdk\NDI6-SDK.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR="$installDir"
-          Start-Sleep -Seconds 3
-
-          # The installer may honor /DIR or default to Program Files; search both.
-          $roots = @($installDir, "C:\Program Files", "C:\Program Files (x86)") | Where-Object { Test-Path $_ }
-          $found = $null
-          foreach ($r in $roots) {
-            $h = Get-ChildItem -Path $r -Recurse -Filter "Processing.NDI.Lib.h" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($h) { $found = $h; break }
-          }
-          if (-not $found) {
-            Write-Host "=== candidate trees (diagnostic) ==="
-            foreach ($r in $roots) {
-              Write-Host "--- $r ---"
-              Get-ChildItem -Path $r -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*NDI*" } | ForEach-Object {
-                Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("  " + $_.FullName) }
-              }
-            }
-            throw "silent install did not produce Processing.NDI.Lib.h (see diagnostic above)"
-          }
-          # anchor to the dir that contains Include
-          $d = $found.Directory
+          # Locate the SDK root (the dir that holds Include/) and stage a flat
+          # ndi-sdk/ with just what the build and the shipped zip need.
+          $hdr = Get-ChildItem -Path ndi-sdk-inno -Recurse -Filter "Processing.NDI.Lib.h" | Select-Object -First 1
+          if (-not $hdr) { throw "Processing.NDI.Lib.h not found in innoextract output" }
+          $d = $hdr.Directory
           while ($d -and -not (Test-Path (Join-Path $d.FullName "Include"))) { $d = $d.Parent }
-          if (-not $d) { throw "SDK root (dir containing Include) not found from $($found.FullName)" }
-          Write-Host "NDI SDK installed to: $($d.FullName)"
-
-          # stage flat ndi-sdk/ from the installed location
-          $lib = Get-ChildItem -Path $d.FullName -Recurse -Filter "Processing.NDI.Lib.x64.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
-          $dll = Get-ChildItem -Path $d.FullName -Recurse -Filter "Processing.NDI.Lib.x64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $d) { throw "SDK root (dir containing Include) not found from $($hdr.FullName)" }
+          $lib = Get-ChildItem -Path $d.FullName -Recurse -Filter "Processing.NDI.Lib.x64.lib" | Select-Object -First 1
+          $dll = Get-ChildItem -Path $d.FullName -Recurse -Filter "Processing.NDI.Lib.x64.dll" | Select-Object -First 1
           if (-not $lib) { throw "Processing.NDI.Lib.x64.lib not found under $($d.FullName)" }
           if (-not $dll) { throw "Processing.NDI.Lib.x64.dll not found under $($d.FullName)" }
+
           New-Item -ItemType Directory -Force -Path ndi-sdk | Out-Null
           Copy-Item (Join-Path $d.FullName "Include\*.h") ndi-sdk/
           Copy-Item $lib.FullName "ndi-sdk/Processing.NDI.Lib.x64.lib"
           Copy-Item $dll.FullName "ndi-sdk/Processing.NDI.Lib.x64.dll"
           $ver = Get-ChildItem -Path $d.FullName -Recurse -Filter "Version.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($ver) { Copy-Item $ver.FullName ndi-sdk/Version.txt }
+          # fallback GNU import-lib alias (the build step regenerates a proper
+          # one with dlltool; this just guarantees the file exists)
           Copy-Item $lib.FullName "ndi-sdk/libndi.dll.a"
           Get-ChildItem ndi-sdk | Format-Table Name, Length
-          Write-Host "NDI SDK provisioned via silent install fallback"
 
       - name: Show NDI SDK version
         shell: bash
@@ -158,12 +99,8 @@ jobs:
           # was removed from the live ucrt64 repo (replaced by sdl2-compat), so the
           # action's bundled DB can't resolve it. Sync the DB, then install.
           pacman -Sy --noconfirm
-          if ! pacman -S --noconfirm mingw-w64-ucrt-x86_64-sdl2-compat; then
-            echo "pacman still cannot resolve sdl2-compat — installing the package tarball directly"
-            PKGURL="https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-sdl2-compat-2.32.72-1-any.pkg.tar.zst"
-            curl -fSL --retry 3 -o /tmp/sdl2c.tar.zst "$PKGURL"
-            pacman -U --noconfirm /tmp/sdl2c.tar.zst
-          fi
+          pacman -S --noconfirm mingw-w64-ucrt-x86_64-sdl2-compat \
+            || { echo "FATAL: pacman cannot install sdl2-compat"; exit 1; }
           # sanity: the .pc file must be visible to the SAME pkg-config configure will
           # invoke. Under --enable-cross-configure FFmpeg prefixes with cross_prefix, so
           # it calls the cross binary, not native 'pkg-config'.
@@ -220,9 +157,6 @@ jobs:
           # 'Syntax error in def file ...:0' plus a stub libndi.dll.a, and the
           # final link then dies on undefined __imp_NDIlib_*. Correct flow:
           # extract the export table from the DLL -> def -> dlltool.
-          # We parse the PE export table directly in Python (stdlib only)
-          # instead of text-scraping `objdump -p` — that output format has
-          # changed across binutils versions and broke the awk parse.
           DLL=ndi-sdk/Processing.NDI.Lib.x64.dll
           DEF=ndi-sdk/ndi-exports.def
           rm -f ndi-sdk/libndi.dll.a   # drop the PE-.lib copy staged as a fallback
@@ -231,51 +165,11 @@ jobs:
           command -v python >/dev/null || command -v python3 >/dev/null \
             || { echo "FATAL: no python interpreter in msys2 shell"; exit 1; }
           PYTHON_BIN=$(command -v python || command -v python3)
-          "$PYTHON_BIN" - "$DLL" "$DEF" <<'PYEOF'
-          import struct, sys
-          dll_path, def_path = sys.argv[1], sys.argv[2]
-          d = open(dll_path, 'rb').read()
-          pe = struct.unpack_from('<I', d, 0x3C)[0]
-          assert d[pe:pe+4] == b'PE\x00\x00', "not PE"
-          nsec   = struct.unpack_from('<H', d, pe+6)[0]
-          opthsz = struct.unpack_from('<H', d, pe+20)[0]
-          opt    = pe + 24
-          magic  = struct.unpack_from('<H', d, opt)[0]
-          dd     = opt + (112 if magic == 0x20b else 96)
-          exp_rva, _ = struct.unpack_from('<II', d, dd)
-          if not exp_rva:
-              sys.exit("no export directory")
-          sec_off = opt + opthsz
-          secs = []
-          for i in range(nsec):
-              o = sec_off + i*40
-              vsize, va, rawsz, rawptr = struct.unpack_from('<IIII', d, o+8)
-              secs.append((va, vsize, rawptr))
-          def va2off(va):
-              for (s_va, s_vs, ro) in secs:
-                  if s_vs and s_va <= va < s_va + s_vs:
-                      return ro + (va - s_va)
-              return None
-          er = va2off(exp_rva)
-          if er is None:
-              sys.exit(f"export RVA {exp_rva:#x} not mapped")
-          # IMAGE_EXPORT_DIRECTORY (NO magic field — first DWORD is Characteristics)
-          nfunc   = struct.unpack_from('<I', d, er+20)[0]
-          nnames  = struct.unpack_from('<I', d, er+24)[0]
-          names_rva = struct.unpack_from('<I', d, er+32)[0]
-          names = va2off(names_rva)
-          out = []
-          for i in range(nnames):
-              rva = struct.unpack_from('<I', d, names + 4*i)[0]
-              o = va2off(rva)
-              e = d.index(b'\0', o)
-              out.append(d[o:e].decode('utf-8', 'replace'))
-          with open(def_path, 'w', newline='') as f:
-              f.write('LIBRARY "Processing.NDI.Lib.x64.dll"\nEXPORTS\n')
-              for s in out:
-                  f.write('  ' + s + '\n')
-          print(f"parsed {len(out)} exports from {dll_path}")
-          PYEOF
+          # Export table is parsed directly from the PE (ndi-patch/di_exports.py,
+          # stdlib only) instead of text-scraping `objdump -p` — that output
+          # format changed across binutils versions and broke the old awk parse.
+          "$PYTHON_BIN" ../ndi-patch/di_exports.py "$DLL" "$DEF" \
+            || { echo "FATAL: PE export parse failed"; exit 1; }
           NEXP=$(grep -c '^  ' "$DEF" || true)
           if [ "$NEXP" -lt 20 ]; then
             echo "FATAL: only $NEXP NDI exports extracted from $DLL"
@@ -359,7 +253,8 @@ jobs:
         shell: msys2 {0}
         working-directory: ffmpeg
         run: |
-          cp ndi-sdk/*.dll .
+          # runtime DLLs (incl. the NDI one) are already staged next to the exes
+          # by the Version check step — nothing to copy here.
           ./ffmpeg.exe -hide_banner -devices 2>&1 | tee devices.log
           grep -q "libndi_newtek" devices.log || { echo "libndi_newtek missing from -devices"; exit 1; }
           echo "OK: NDI in/out devices registered"
