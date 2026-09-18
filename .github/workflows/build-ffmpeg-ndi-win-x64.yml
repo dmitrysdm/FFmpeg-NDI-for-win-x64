@@ -249,6 +249,13 @@ jobs:
               || { echo "FATAL: __imp_$sym missing from libndi.dll.a"; exit 1; }
           done
           echo "libndi.dll.a OK"
+          # A .dll.a import lib IS a static archive (import thunks) — exactly how
+          # libkernel32.a & friends work. But under -static, ld resolves -lndi to
+          # libndi.a (NOT libndi.dll.a): "cannot find -lndi: have you installed
+          # the static version of the ndi library?". The NDI vendor ships no real
+          # static lib, so alias the import lib under the static name too.
+          cp -f ndi-sdk/libndi.dll.a ndi-sdk/libndi.a
+          echo "libndi.a staged (alias of the import lib)"
           ls -la ndi-sdk
 
       - name: Configure FFmpeg
