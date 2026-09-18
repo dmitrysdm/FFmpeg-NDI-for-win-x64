@@ -92,19 +92,30 @@ jobs:
           Add-Content $env:GITHUB_ENV "MSYS2_ROOT=$root"
           Write-Host "MSYS2_ROOT exported: $root"
 
-      - name: Install SDL2 (plain) via freshly-synced pacman DB
+      - name: Install SDL2 (plain) + static winpthread via freshly-synced DB
         shell: msys2 {0}
         run: |
-          # PLAIN SDL2 (not sdl2-compat). It is present in the live ucrt64 repo
-          # as 2.32.x (the old 'removed' note is stale) and ships sdl2.pc plus
-          # the import lib (libSDL2.dll.a) that configure's dynamic SDL2
-          # test-link needs. Its small dep tree (vulkan, libiconv, cc-libs,
-          # libwinpthread, tzdata) is all in the repo. We link SDL2 DYNAMICALLY
-          # (only the GCC runtime is baked in via -static-libgcc); the static
-          # libSDL2.a that plain SDL2 also ships is a bonus, not required.
+          # PLAIN SDL2 (not sdl2-compat): present in the live ucrt64 repo as
+          # 2.32.x (the old 'removed' note is stale) and ships libSDL2.a (the
+          # STATIC archive a full -static build needs; compat has only the
+          # import lib) plus sdl2.pc.
+          # winpthreads: ships libwinpthread.a. The default libwinpthread
+          # package is DLL-only, and with -static every configure test-link
+          # that pulls in -lmingw32 (i.e. SDL2's) needs the static winpthread
+          # or it silently fails and the lib is dropped. Its pin
+          # (libwinpthread=<exact version>) matches the version gcc-libs
+          # already installed, so this is additive.
           pacman -Sy --noconfirm
           pacman -S --noconfirm mingw-w64-ucrt-x86_64-SDL2 \
             || { echo "FATAL: pacman cannot install plain SDL2"; exit 1; }
+          pacman -S --noconfirm mingw-w64-ucrt-x86_64-winpthreads \
+            || { echo "FATAL: pacman cannot install winpthreads (static libwinpthread.a)"; exit 1; }
+          MROOT="${MSYS2_ROOT//\\//}"
+          for f in libSDL2.a libwinpthread.a; do
+            test -f "$MROOT/ucrt64/lib/$f" \
+              || { echo "FATAL: static $f not found"; exit 1; }
+            echo "$f present (static): $(ls -la "$MROOT/ucrt64/lib/$f" | awk '{print $5" bytes"}')"
+          done
           # sanity: the .pc file must be visible to the SAME pkg-config configure will
           # invoke. Under --enable-cross-configure FFmpeg prefixes with cross_prefix, so
           # it calls the cross binary, not native 'pkg-config'.
@@ -246,17 +257,27 @@ jobs:
         env:
           PKG_CONFIG_PATH: ${{ env.MSYS2_ROOT }}/ucrt64/lib/pkgconfig
         run: |
-          # -static-libgcc -static-libstdc++ in --extra-ldflags: bake the GCC
-          # C/C++ runtime (libgcc_s_seh-1.dll + libstdc++-6.dll) directly into
-          # the exes. We do NOT use full -static: it forces configure's
-          # test-links to link fully static, and the MSYS2 MinGW toolchain
-          # ships no libwinpthread.a / static import archives, so external
-          # libs (sdl2) fail their static test-link and get silently dropped.
-          # The targeted -static-lib* flags only affect the GCC runtime and
-          # leave the test-links dynamic. NDI stays dynamic too (vendor ships
-          # it ONLY as a shared library). NOTE: no comment lines inside the
-          # backslash chain below — a backslash-continued comment silently
-          # terminates the configure invocation.
+          # Full -static in --extra-ldflags: bake EVERYTHING (GCC runtime,
+          # zlib, bz2, lzma, iconv, SDL2, winpthread, and the Windows CRT
+          # import libs) into the exes. The only thing left as a DLL is NDI —
+          # the vendor ships Processing.NDI.Lib.x64.dll with NO static variant,
+          # so it is linked via its import lib and stays a runtime DLL.
+          #
+          # Prerequisites (all verified present in the live ucrt64 repo):
+          #   - plain SDL2  -> libSDL2.a + libSDL2main.a   (compat has no .a)
+          #   - winpthreads -> libwinpthread.a             (default libwinpthread
+          #                                                    pkg is DLL-only;
+          #                                                    without it every
+          #                                                    static test-link
+          #                                                    that pulls in
+          #                                                    -lmingw32 fails
+          #                                                    and the lib is
+          #                                                    silently dropped)
+          #   - zlib/bzip2/xz/libiconv -> libz.a/libbz2.a/liblzma.a/libiconv.a
+          #   - gcc -> libgcc.a/libstdc++.a ; crt -> libmingw32.a + all the
+          #     Windows *.a import libs.
+          # NOTE: no comment lines inside the backslash chain below — a
+          # backslash-continued comment silently terminates the configure call.
           ./configure \
             --cross-prefix=x86_64-w64-mingw32- \
             --target-os=win32 \
@@ -270,7 +291,7 @@ jobs:
             --disable-debug \
             --enable-libndi_newtek \
             --extra-cflags="-I`pwd`/ndi-sdk" \
-            --extra-ldflags="-static-libgcc -static-libstdc++" \
+            --extra-ldflags="-static" \
             --extra-libs="-L`pwd`/ndi-sdk" \
             | tee configure.log
           echo "--- external libs summary ---"
@@ -278,7 +299,15 @@ jobs:
           # hard-fail if either NDI or SDL2 (needed for ffplay) was not enabled —
           # otherwise make would silently skip ffplay and ship a broken zip
           grep -A40 "^External libraries:" configure.log | grep -q "libndi_newtek" || { echo "FATAL: libndi_newtek not enabled"; tail -n 40 configure.log; exit 1; }
-          grep -A40 "^External libraries:" configure.log | grep -q "sdl2"           || { echo "FATAL: sdl2 not enabled (ffplay will be missing)"; tail -n 40 configure.log; exit 1; }
+          grep -A40 "^External libraries:" configure.log | grep -q "sdl2"           || {
+            echo "FATAL: sdl2 not enabled (ffplay will be missing). Dumping the real configure test-link error from config.log:"
+            echo "=== config.log: sdl2 / SDL_PollEvent test ==="
+            grep -n "SDL" config.log 2>/dev/null | tail -30
+            echo "=== config.log: link errors (cannot find / undefined reference / error:) ==="
+            grep -nE "cannot find|undefined reference|error:|No such file|not found" config.log 2>/dev/null | tail -50
+            echo "=== config.log: tail 80 ==="
+            tail -n 80 config.log 2>/dev/null
+            exit 1; }
           echo "OK: libndi_newtek + sdl2 enabled"
 
       - name: Build FFmpeg
