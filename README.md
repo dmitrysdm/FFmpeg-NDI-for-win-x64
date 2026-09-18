@@ -13,7 +13,10 @@ Workflow: `.github/workflows/build-ffmpeg-ndi-win-x64.yml` (запускаетс
 
 1. **NDI SDK** берётся из установщика `sdk/NDI6-SDK.exe`, закоммиченного в репозиторий,
    и распаковывается 7-Zip **без установки** (официальный download.ndi.tv отдаёт 403).
-2. MSYS2 (ucrt64) + mingw-w64 cross toolchain: `mingw-w64-ucrt-x86_64-{gcc,nasm,sdl2,zlib,pkgconf}`.
+2. MSYS2 (ucrt64) + mingw-w64 cross toolchain: `mingw-w64-ucrt-x86_64-{gcc,binutils,nasm,zlib,pkgconf,python}`
+   + отдельным шагом plain `SDL2` и `winpthreads` (после `pacman -Sy`; оба дают
+   статические архивы, нужные полному `-static`; bz2/lzma/iconv подтягиваются
+   зависимостями).
 3. Клонируется FFmpeg `n9.0.1`, накладывается `ndi-patch/ffmpeg_9.0-add_ndi.patch`
    (+ `libndi_newtek_{common,dec,enc}`), SDK кладётся в дерево сборки
    (`Processing.NDI.Lib.h` + `libndi.dll.a` для `-lndi`).
@@ -59,7 +62,7 @@ ffmpeg -i "ИМЯ_ИСТОЧНИКА" -c copy out.mkv
 ffmpeg -re -i input.mp4 -c:v wrapped_avframe -pix_fmt uyvy422 -c:a pcm_s16le -f libndi_newtek MY_SOURCE
 ```
 
-NDI DLL лежат рядом с бинарниками в архиве — распаковывайте целиком в одну папку.
+NDI DLL лежит рядом с бинарниками в архиве — распаковывайте целиком в одну папку.
 
 ## Состав репозитория
 
