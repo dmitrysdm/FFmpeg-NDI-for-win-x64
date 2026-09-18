@@ -92,15 +92,25 @@ jobs:
           Add-Content $env:GITHUB_ENV "MSYS2_ROOT=$root"
           Write-Host "MSYS2_ROOT exported: $root"
 
-      - name: Install SDL2 (compat) via freshly-synced pacman DB
+      - name: Install SDL2 (plain, ships static libSDL2.a) via freshly-synced DB
         shell: msys2 {0}
         run: |
-          # The MSYS2 base image ships a stale repo.db: the plain 'sdl2' package
-          # was removed from the live ucrt64 repo (replaced by sdl2-compat), so the
-          # action's bundled DB can't resolve it. Sync the DB, then install.
+          # PLAIN SDL2, not sdl2-compat. With -static in LDFLAGS FFmpeg's
+          # configure does a STATIC test-link for SDL2 and needs libSDL2.a.
+          # sdl2-compat ships only the import lib (libSDL2.dll.a) — no static
+          # archive — so SDL2 would be silently dropped and ffplay missing.
+          # The plain package ships libSDL2.a (static) + sdl2.pc; its small dep
+          # tree (vulkan, libiconv, cc-libs, libwinpthread, tzdata) is all in
+          # the live ucrt64 repo. (The old 'plain sdl2 was removed' note is
+          # stale — it is back in the repo as 2.32.x.)
           pacman -Sy --noconfirm
-          pacman -S --noconfirm mingw-w64-ucrt-x86_64-sdl2-compat \
-            || { echo "FATAL: pacman cannot install sdl2-compat"; exit 1; }
+          pacman -S --noconfirm mingw-w64-ucrt-x86_64-SDL2 \
+            || { echo "FATAL: pacman cannot install plain SDL2"; exit 1; }
+          # the static archive is the load-bearing file for -static linking
+          MROOT="${MSYS2_ROOT//\\//}"
+          test -f "$MROOT/ucrt64/lib/libSDL2.a" \
+            || { echo "FATAL: libSDL2.a (static archive) not found"; exit 1; }
+          echo "libSDL2.a present (static): $(ls -la "$MROOT/ucrt64/lib/libSDL2.a" | awk '{print $5" bytes"}')"
           # sanity: the .pc file must be visible to the SAME pkg-config configure will
           # invoke. Under --enable-cross-configure FFmpeg prefixes with cross_prefix, so
           # it calls the cross binary, not native 'pkg-config'.

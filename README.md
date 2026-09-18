@@ -18,16 +18,18 @@ Workflow: `.github/workflows/build-ffmpeg-ndi-win-x64.yml` (запускаетс
    (+ `libndi_newtek_{common,dec,enc}`), SDK кладётся в дерево сборки
    (`Processing.NDI.Lib.h` + `libndi.dll.a` для `-lndi`).
 4. `configure --enable-nonfree --enable-libndi_newtek --extra-ldflags=-static ...`,
-   `make -j2`. `-static` в ldflags зашивает GCC-рантайм и zlib прямо в exe
-   (статические архивы `.a` берутся автоматически); SDL2 линкуется через
-   импортную библиотеку (sdl2-compat не содержит статического `.a`), NDI —
-   только shared (статической версии у вендора нет).
+   `make -j2`. `-static` в ldflags зашивает GCC-рантайм, zlib и SDL2 прямо в exe
+   (для статического линка ставится plain-пакет `mingw-w64-ucrt-x86_64-SDL2` —
+   он содержит `libSDL2.a`; `sdl2-compat` даёт только импортную библиотеку).
+   NDI остаётся dynamic: вендор распространяет NDI только как shared-библиотеку,
+   статической версии не существует.
 5. Smoke-тесты: `-devices` содержит `libndi_newtek`, импорт `Processing.NDI.Lib.x64.dll`
    в ffmpeg.exe, и **реальный NDI-лоупбек**: lavfi-источник транслируется в
    `hermes_ci_source`, ffmpeg его ловит, декодирует ≥25 кадров.
-6. Результат: артефакт `ffmpeg-9.0.1-ndi-win-x64.zip` (3 exe + `Processing.NDI.Lib.x64.dll`
-   + `SDL2.dll` + Version.txt + README); DLL подставляются динамически по таблицам
-   PE-импортов exe, а не по хардкод-списку. При ручном запуске дополнительно
+6. Результат: артефакт `ffmpeg-9.0.1-ndi-win-x64.zip` (3 exe +
+   `Processing.NDI.Lib.x64.dll` + Version.txt + README); комплект DLL
+   определяется динамически из PE-таблиц импортов exe (системные DLL
+   отбрасываются), а не хардкод-списком. При ручном запуске дополнительно
    публикуется GitHub Release (prerelease).
 
 ## Запуск
