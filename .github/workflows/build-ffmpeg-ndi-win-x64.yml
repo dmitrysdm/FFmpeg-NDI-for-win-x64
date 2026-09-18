@@ -242,6 +242,13 @@ jobs:
         env:
           PKG_CONFIG_PATH: ${{ env.MSYS2_ROOT }}/ucrt64/lib/pkgconfig
         run: |
+          # -static goes in --extra-ldflags (NOT extra-libs): ld applies it only
+          # to libraries that FOLLOW the flag, and the pkg-config -lz/-lSDL2
+          # come before extra-libs — so it must sit in LDFLAGS to catch them.
+          # Result: GCC runtime + zlib baked into the exes. NDI stays dynamic
+          # (vendor ships it ONLY as a shared library). NOTE: no comment lines
+          # inside the backslash chain below — a backslash-continued comment
+          # silently terminates the configure invocation.
           ./configure \
             --cross-prefix=x86_64-w64-mingw32- \
             --target-os=win32 \
@@ -255,12 +262,6 @@ jobs:
             --disable-debug \
             --enable-libndi_newtek \
             --extra-cflags="-I`pwd`/ndi-sdk" \
-            # -static in --extra-ldflags (NOT extra-libs): ld applies -static only
-            # to libraries that FOLLOW the flag on the link line, and the
-            # pkg-config -lz/-lSDL2 come before extra-libs — so the flag must be
-            # in LDFLAGS to catch them. Result: GCC runtime, zlib, SDL2 all
-            # baked into the exes. NDI stays dynamic (it ships ONLY as a shared
-            # library; its import lib is fine to link in a -static exe).
             --extra-ldflags="-static" \
             --extra-libs="-L`pwd`/ndi-sdk" \
             | tee configure.log
