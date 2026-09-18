@@ -502,10 +502,14 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+          # Upload the FOLDER, not the inner zip: the artifact you download from
+          # the Actions page is then exactly the folder contents (3 exes + the
+          # NDI DLL + README), with no nested ffmpeg-9.0.1-ndi-win-x64.zip and
+          # no stray devices.log. (The zip is still built for the manual
+          # GitHub Release below.)
           name: ffmpeg-9.0.1-ndi-win-x64
           path: |
-            ffmpeg-9.0.1-ndi-win-x64.zip
-            ffmpeg/devices.log
+            ffmpeg-9.0.1-ndi-win-x64/
           if-no-files-found: error
 
       - name: Upload loopback test logs (diagnostics)
@@ -517,6 +521,7 @@ jobs:
             ffmpeg/transmit.log
             ffmpeg/receive.log
             ffmpeg/outinfo.log
+            ffmpeg/devices.log
           if-no-files-found: ignore
 
       - name: Publish GitHub Release (manual runs only)
@@ -527,7 +532,6 @@ jobs:
           name: FFmpeg 9.0.1 + NDI (win-x64) — run ${{ github.run_number }}
           files: |
             ffmpeg-9.0.1-ndi-win-x64.zip
-            ffmpeg/devices.log
           draft: false
           prerelease: true
           generate_release_notes: true

@@ -17,21 +17,26 @@ Workflow: `.github/workflows/build-ffmpeg-ndi-win-x64.yml` (запускаетс
 3. Клонируется FFmpeg `n9.0.1`, накладывается `ndi-patch/ffmpeg_9.0-add_ndi.patch`
    (+ `libndi_newtek_{common,dec,enc}`), SDK кладётся в дерево сборки
    (`Processing.NDI.Lib.h` + `libndi.dll.a` для `-lndi`).
-4. `configure --enable-nonfree --enable-libndi_newtek --extra-ldflags="-static-libgcc -static-libstdc++" ...`,
-   `make -j2`. GCC-рантайм (libgcc/libstdc++) зашивается в exe
-   (полный `-static` не используется: он заставляет configure делать
-   статические тест-линки внешних либ, а в MinGW-тулчейне MSYS2 нет
-   статических импорт-архивов — SDL2 молча выпадает).
-   SDL2 и NDI линкуются динамически (у NDI статической версии нет в принципе).
+4. `configure --enable-nonfree --enable-libndi_newtek --pkg-config-flags=--static
+   --extra-ldflags=-static ...`, `make -j2`. **Полная статическая сборка**: в exe
+   зашиты SDL2, zlib, bz2, lzma, iconv, winpthread, GCC-рантайм и все
+   Windows-CRT импорт-библиотеки. Для этого нужны статические архивы из репо
+   MSYS2: plain `SDL2` (даёт `libSDL2.a`; `sdl2-compat` — нет), пакет
+   `winpthreads` (даёт статический `libwinpthread.a`; обычный `libwinpthread` —
+   только DLL), плюс `--pkg-config-flags=--static`, чтобы тест-линки configure
+   видели `Libs.private` из `.pc` (иначе SDL2 молча выпадает).
 5. Smoke-тесты: `-devices` содержит `libndi_newtek`, импорт `Processing.NDI.Lib.x64.dll`
    в ffmpeg.exe, и **реальный NDI-лоупбек**: lavfi-источник транслируется в
    `hermes_ci_source`, ffmpeg его ловит, декодирует ≥25 кадров.
-6. Результат: артефакт `ffmpeg-9.0.1-ndi-win-x64.zip` (3 exe +
-   `Processing.NDI.Lib.x64.dll` + `SDL2.dll` + `zlib1.dll` + Version.txt + README);
-   комплект DLL определяется динамически из PE-таблиц импортов exe
+6. Результат — артефакт `ffmpeg-9.0.1-ndi-win-x64` с **3 exe + 1 DLL**:
+   `ffmpeg.exe`, `ffprobe.exe`, `ffplay.exe` и `Processing.NDI.Lib.x64.dll`
+   (NDI вендор раздаёт только как shared-библиотеку — статической версии не
+   существует, это единственный файл, который обязан лежать рядом с exe).
+   Комплект DLL определяется динамически из PE-таблиц импортов exe
    (системные DLL отбрасываются), а не хардкод-списком — папка распаковки
-   самодостаточна. При ручном запуске дополнительно публикуется
-   GitHub Release (prerelease).
+   самодостаточна. Скачанный с GitHub Actions архив содержит сами файлы
+   (без вложенного zip). При ручном запуске дополнительно публикуется
+   GitHub Release (prerelease) с `ffmpeg-9.0.1-ndi-win-x64.zip`.
 
 ## Запуск
 
