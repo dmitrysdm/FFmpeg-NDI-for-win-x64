@@ -276,6 +276,13 @@ jobs:
           #   - zlib/bzip2/xz/libiconv -> libz.a/libbz2.a/liblzma.a/libiconv.a
           #   - gcc -> libgcc.a/libstdc++.a ; crt -> libmingw32.a + all the
           #     Windows *.a import libs.
+          # --pkg-config-flags=--static: make every pkg-config query return
+          # Libs + Libs.private. Without it the sdl2 static test-link only
+          # gets 'Libs: -lmingw32 -lSDL2main -lSDL2' and fails to resolve
+          # the system symbols (kernel32/user32/gdi32/winmm/ole32/...) that
+          # libSDL2.a's Libs.private names — sdl2 then gets silently dropped.
+          # (zlib/bz2/lzma/iconv have no Libs.private, which is why they
+          # passed while sdl2 failed.)
           # NOTE: no comment lines inside the backslash chain below — a
           # backslash-continued comment silently terminates the configure call.
           ./configure \
@@ -290,6 +297,7 @@ jobs:
             --disable-network \
             --disable-debug \
             --enable-libndi_newtek \
+            --pkg-config-flags=--static \
             --extra-cflags="-I`pwd`/ndi-sdk" \
             --extra-ldflags="-static" \
             --extra-libs="-L`pwd`/ndi-sdk" \
@@ -297,16 +305,20 @@ jobs:
           echo "--- external libs summary ---"
           grep -A40 "^External libraries:" configure.log | grep -E "libndi_newtek|sdl2|zlib" || true
           # hard-fail if either NDI or SDL2 (needed for ffplay) was not enabled —
-          # otherwise make would silently skip ffplay and ship a broken zip
-          grep -A40 "^External libraries:" configure.log | grep -q "libndi_newtek" || { echo "FATAL: libndi_newtek not enabled"; tail -n 40 configure.log; exit 1; }
+          # otherwise make would silently skip ffplay and ship a broken zip.
+          # (Diagnostic guards each grep with || true: this shell runs with
+          # errexit+pipefail, so a failing grep|tail aborts the whole step
+          # before the rest of the dump prints.)
+          CFGLOG="ffbuild/config.log"
+          grep -A40 "^External libraries:" configure.log | grep -q "libndi_newtek" || { echo "FATAL: libndi_newtek not enabled"; tail -n 40 configure.log || true; exit 1; }
           grep -A40 "^External libraries:" configure.log | grep -q "sdl2"           || {
-            echo "FATAL: sdl2 not enabled (ffplay will be missing). Dumping the real configure test-link error from config.log:"
-            echo "=== config.log: sdl2 / SDL_PollEvent test ==="
-            grep -n "SDL" config.log 2>/dev/null | tail -30
-            echo "=== config.log: link errors (cannot find / undefined reference / error:) ==="
-            grep -nE "cannot find|undefined reference|error:|No such file|not found" config.log 2>/dev/null | tail -50
-            echo "=== config.log: tail 80 ==="
-            tail -n 80 config.log 2>/dev/null
+            echo "FATAL: sdl2 not enabled (ffplay will be missing). Dumping the real configure test-link error from $CFGLOG:"
+            echo "=== $CFGLOG: SDL mentions ==="
+            grep -n "SDL" "$CFGLOG" 2>/dev/null | tail -30 || true
+            echo "=== $CFGLOG: link errors (cannot find / undefined reference / error:) ==="
+            grep -nE "cannot find|undefined reference|error:|No such file|not found" "$CFGLOG" 2>/dev/null | tail -50 || true
+            echo "=== $CFGLOG: tail 120 ==="
+            tail -n 120 "$CFGLOG" 2>/dev/null || true
             exit 1; }
           echo "OK: libndi_newtek + sdl2 enabled"
 
@@ -319,11 +331,16 @@ jobs:
         shell: msys2 {0}
         working-directory: ffmpeg
         run: |
-          # With -static-libgcc the exes should import nothing but Windows
-          # system DLLs plus NDI and SDL2 (the GCC runtime is baked in).
+          # With FULL -static the exes should import nothing but Windows
+          # system DLLs plus NDI (the vendor ships NDI shared-only, so it is
+          # the one unavoidable runtime DLL). GCC runtime, zlib, bz2, lzma,
+          # iconv, SDL2 and the Windows CRT import libs are all baked in.
           # Don't trust a hardcoded DLL list: extract the PE import table of
           # each exe, drop system-provided names, and stage whatever remains
-          # (from ndi-sdk/ or ucrt64/bin/) next to the exes.
+          # (from ndi-sdk/ or ucrt64/bin/) next to the exes. If SDL2 or any
+          # other lib unexpectedly stays dynamic (a static .a was missing),
+          # this still stages its DLL so the zip stays runnable, and the
+          # 'note:' lines below tell us which lib failed to go static.
           B="${MSYS2_ROOT//\\//}/ucrt64/bin"
           IMPS=imports.txt
           : > "$IMPS"
