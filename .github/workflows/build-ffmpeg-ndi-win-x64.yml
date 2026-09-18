@@ -255,6 +255,13 @@ jobs:
             --disable-debug \
             --enable-libndi_newtek \
             --extra-cflags="-I`pwd`/ndi-sdk" \
+            # -static in --extra-ldflags (NOT extra-libs): ld applies -static only
+            # to libraries that FOLLOW the flag on the link line, and the
+            # pkg-config -lz/-lSDL2 come before extra-libs — so the flag must be
+            # in LDFLAGS to catch them. Result: GCC runtime, zlib, SDL2 all
+            # baked into the exes. NDI stays dynamic (it ships ONLY as a shared
+            # library; its import lib is fine to link in a -static exe).
+            --extra-ldflags="-static" \
             --extra-libs="-L`pwd`/ndi-sdk" \
             | tee configure.log
           echo "--- external libs summary ---"
@@ -274,18 +281,28 @@ jobs:
         shell: msys2 {0}
         working-directory: ffmpeg
         run: |
-          # The exes are native Windows PEs. When launched from the msys2 shell
-          # their Windows loader only searches the exe's own dir + the Windows
-          # PATH. ffmpeg.exe imports Processing.NDI.Lib.x64.dll (it links -lndi)
-          # which lives in ndi-sdk/ — not on that search path — so the loader
-          # fails before any output -> MSYS2 'cannot open shared object file' ->
-          # exit 127. Stage the full runtime DLL set next to the exes (identical
-          # layout to the shipped zip) so every dependency resolves.
+          # With -static linking the exes should import nothing but Windows
+          # system DLLs plus NDI. Don't trust a hardcoded DLL list: extract the
+          # PE import table of each exe, drop system-provided names, and stage
+          # whatever remains (from ndi-sdk/ or ucrt64/bin/) next to the exes.
           B="${MSYS2_ROOT//\\//}/ucrt64/bin"
-          cp -f ndi-sdk/Processing.NDI.Lib.x64.dll .
-          for d in SDL3.dll SDL2.dll libgcc_s_seh-1.dll libwinpthread-1.dll libstdc++-6.dll; do
-            if [ -f "$B/$d" ]; then cp -f "$B/$d" .; else echo "note: $d not in ucrt64/bin"; fi
+          IMPS=imports.txt
+          : > "$IMPS"
+          for e in ffmpeg.exe ffprobe.exe ffplay.exe; do
+            x86_64-w64-mingw32-objdump -p "$e" | grep -oE "DLL Name: [A-Za-z0-9._-]+\.dll" | awk '{print $3}' >> "$IMPS"
           done
+          sort -u "$IMPS" | grep -viE "^(api-ms-win-|api-ms-win-crt|ext-ms-win-|ucrtbase|kernel32|kernelbase|ntdll|user32|gdi32|gdiplus|advapi32|msvcrt|msvcp|ws2_32|wsock32|mswsock|winmm|d3d|dxgi|dxguid|dinput8|dbt|shell32|shlwapi|ole32|oleaut32|setupapi|psapi|secur32|crypt32|winhttp|wininet|version|wtsapi32|msimg32|comdlg32|comctl32|combase|iphlpapi|netapi32|rpcrt4|wintrust|wldap32|clbcatq|msacm32|windows\.codecs|msxml|uxtheme|dwmapi|userenv|imm32|xinput|desktop|winspool|bcrypt|msvc)" > need.txt || true
+          cat need.txt
+          if grep -qiE "Processing.NDI" need.txt; then :; else echo "FATAL: ffmpeg.exe does not import the NDI library"; exit 1; fi
+          if grep -qiE "^(SDL2|SDL3)\.dll$" need.txt; then
+            echo "note: SDL2 is still dynamic — ffplay will ship with its DLL"
+          fi
+          while read -r d; do
+            [ -z "$d" ] && continue
+            if [ -f "ndi-sdk/$d" ]; then cp -f "ndi-sdk/$d" .
+            elif [ -f "$B/$d" ]; then cp -f "$B/$d" .
+            else echo "note: $d not staged (expected to be system-provided)"; fi
+          done < need.txt
           ls -la *.dll
           test -f ffmpeg.exe  || { echo "FATAL: ffmpeg.exe missing";  exit 1; }
           test -f ffprobe.exe || { echo "FATAL: ffprobe.exe missing"; exit 1; }
@@ -404,14 +421,16 @@ jobs:
           Copy-Item ffmpeg/ffmpeg.exe  $pkg/
           Copy-Item ffmpeg/ffprobe.exe $pkg/
           Copy-Item ffmpeg/ffplay.exe  $pkg/
-          Copy-Item ffmpeg/ndi-sdk/Processing.NDI.Lib.x64.dll $pkg/
-          if (Test-Path ffmpeg/ndi-sdk/Version.txt) { Copy-Item ffmpeg/ndi-sdk/Version.txt $pkg/ }
-
-          $ucrtBin = Join-Path $env:MSYS2_ROOT "ucrt64/bin"
-          foreach ($d in @("SDL3.dll","SDL2.dll","libgcc_s_seh-1.dll","libwinpthread-1.dll","libstdc++-6.dll")) {
-            $src = Join-Path $ucrtBin $d
-            if (Test-Path $src) { Copy-Item $src $pkg/ } else { Write-Host "note: $d not found in ucrt64/bin" }
+          # The msys2 "Version check" step staged next to the exes EXACTLY the
+          # DLLs the PE import tables require (ndi-sdk/ + ucrt64/bin/ sources).
+          # Ship that staged set verbatim — with a fully static link this is
+          # just the NDI DLL (NDI has no static variant); if SDL2 stayed
+          # dynamic its DLL is in the staged set too.
+          Get-ChildItem ffmpeg/*.dll | ForEach-Object {
+            Copy-Item $_.FullName $pkg/
+            Write-Host "staged: $($_.Name)"
           }
+          if (Test-Path ffmpeg/ndi-sdk/Version.txt) { Copy-Item ffmpeg/ndi-sdk/Version.txt $pkg/ }
           Copy-Item README.md $pkg/
 
           Get-ChildItem $pkg | Format-Table Name, Length
